@@ -47,6 +47,13 @@ def _j(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False, default=str)
 
 
+# Memories (character/shared) that still have to be judged against revision :cr.
+_NEEDS_CHECK = (
+    "((m.conflicts_with_revision IS NULL AND COALESCE(m.checked_character_rev, 0) < :cr) "
+    "OR m.conflicts_with_revision < :cr)"
+)
+
+
 def changed_fields(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, tuple[str, str]]:
     """Card fields whose text differs, keyed by their Korean label. An unknown old card counts as empty."""
     old = old or {}
@@ -148,15 +155,24 @@ class MemoryPipeline:
     async def _revision_check(self, fenced: FencedJob) -> None:
         """Hide only the character/shared memories that contradict the current character card.
 
-        Candidates are memories not yet checked against the conversation's current revision. Each batch
-        is judged by the extraction model; ids it names (and only ids we sent) get
-        ``conflicts_with_revision``, the rest get ``checked_character_rev``. If the model keeps failing the
-        job gives up and the unchecked character facts simply stay hidden (fail closed).
+        Candidates are memories not yet checked against the conversation's current revision, plus
+        memories marked as conflicting under an older revision (a later edit may have undone the change).
+        Each group is judged by the extraction model against the card it was last judged with; ids it
+        names (and only ids we sent) get ``conflicts_with_revision``, the rest become usable under the
+        current revision. Writes only land if the conversation is still at the revision that was judged
+        and only ever move a row forward, so a slow job for an older edit cannot undo a newer one.
+        If the model keeps failing, the job ends FAILED, the unchecked character facts stay hidden
+        (fail closed), and the worker re-queues the job later (``requeue_failed_revisions``).
         """
         job = fenced.job
         scope = {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch}
         batch = self.cfg.tuning.memory.revision_check_batch
-        usages = []
+        if job.run_count > 3 * self.cfg.tuning.memory.max_runs:
+            # Lost its lease again and again (slow model): stop paying for the same calls.
+            async with self.sv.db.tx() as s:
+                await fenced.finish(s, "FAILED", error_code="PROVIDER_TIMEOUT", error_detail="lease lost repeatedly")
+            return
+        usages: list[Any] = []
         while True:
             async with self.sv.db.session() as s:
                 current_rev = await s.scalar(text(
@@ -172,22 +188,34 @@ class MemoryPipeline:
                     ), scope)).all()
                 }
                 rows = (await s.execute(text(
-                    "SELECT id, subject, predicate, value, evidence, is_fiction, checked_character_rev FROM memory "
-                    "WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c AND epoch=:e AND valid_to IS NULL "
-                    "AND conflicts_with_revision IS NULL AND subject <> 'user' "
-                    "AND COALESCE(checked_character_rev, 0) < :cr ORDER BY created_at LIMIT :n"
+                    f"SELECT id, subject, predicate, value, evidence, is_fiction, checked_character_rev, "
+                    f"conflicts_with_revision FROM memory m WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c "
+                    f"AND epoch=:e AND valid_to IS NULL AND subject <> 'user' AND {_NEEDS_CHECK} "
+                    f"ORDER BY created_at LIMIT :n"
                 ), {**scope, "cr": current_rev, "n": batch})).mappings().all()
-            if not rows or current_rev not in cards:
+            if not rows:
                 break
+            if current_rev not in cards:
+                log.error("revision check: no settings snapshot for revision", extra={"job": job.id})
+                async with self.sv.db.tx() as s:
+                    await fenced.finish(s, "FAILED", error_code="INTERNAL", error_detail="settings snapshot missing")
+                return
             conflicts: set[str] = set()
-            # One call per old revision so the model sees exactly what changed for those memories.
-            by_rev: dict[int | None, list[Any]] = {}
+            # One call per (state, revision) so the model sees exactly what changed for those memories.
+            groups: dict[tuple[bool, int | None], list[Any]] = {}
             for r in rows:
-                by_rev.setdefault(r["checked_character_rev"], []).append(r)
-            for old_rev, group in by_rev.items():
+                was_conflict = r["conflicts_with_revision"] is not None
+                rev = r["conflicts_with_revision"] if was_conflict else r["checked_character_rev"]
+                groups.setdefault((was_conflict, rev), []).append(r)
+            for (was_conflict, old_rev), group in groups.items():
                 changed = changed_fields(cards.get(old_rev) if old_rev is not None else None, cards[current_rev])
                 if not changed:
-                    continue  # identical card text: nothing can newly conflict
+                    # Same card text: compatible memories stay compatible, conflicting ones stay conflicting.
+                    if was_conflict:
+                        conflicts |= {r["id"] for r in group}
+                    continue
+                async with self.sv.db.tx() as s:
+                    await fenced.guard(s)  # renew the lease around each (possibly slow) model call
                 result, usage = await self.sv.provider.complete_json(
                     self._revision_messages(changed, cards[current_rev], current_rev, group),
                     ChatParams(model=self.cfg.extract_model, temperature=0),
@@ -197,18 +225,24 @@ class MemoryPipeline:
                 conflicts |= parse_conflicts(result, {r["id"] for r in group})
             async with self.sv.db.tx() as s:
                 await fenced.guard(s)
-                ids = [r["id"] for r in rows]
-                await s.execute(text(
-                    "UPDATE memory SET conflicts_with_revision = :cr WHERE id = ANY(:ids) AND tenant_id=:t "
-                    "AND conversation_id=:c AND epoch=:e"
-                ), {"cr": current_rev, "ids": [i for i in ids if i in conflicts], **scope})
-                await s.execute(text(
-                    "UPDATE memory SET checked_character_rev = :cr WHERE id = ANY(:ids) AND tenant_id=:t "
-                    "AND conversation_id=:c AND epoch=:e AND conflicts_with_revision IS NULL"
-                ), {"cr": current_rev, "ids": [i for i in ids if i not in conflicts], **scope})
                 for usage in usages:
                     await self._ledger(s, job, "revision", usage)
                 usages = []
+                still = await s.scalar(text(
+                    "SELECT character_rev FROM ai_conversation WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e "
+                    "FOR SHARE"
+                ), scope)
+                if still != current_rev:
+                    continue  # edited again while we were judging: judge against the newer card instead
+                ids = [r["id"] for r in rows]
+                guard_sql = (
+                    f"WHERE id = ANY(:ids) AND tenant_id=:t AND conversation_id=:c AND epoch=:e AND {_NEEDS_CHECK}"
+                )
+                await s.execute(text(f"UPDATE memory m SET conflicts_with_revision = :cr {guard_sql}"),
+                                {**scope, "cr": current_rev, "ids": [i for i in ids if i in conflicts]})
+                await s.execute(text(
+                    f"UPDATE memory m SET checked_character_rev = :cr, conflicts_with_revision = NULL {guard_sql}"
+                ), {**scope, "cr": current_rev, "ids": [i for i in ids if i not in conflicts]})
             if len(rows) < batch:
                 break
         async with self.sv.db.tx() as s:
@@ -391,8 +425,11 @@ class MemoryPipeline:
         if needs_check:
             # The turn was said under an older card than the conversation has now (extraction lag):
             # check the new character/shared memories against the current card.
+            # FOR SHARE: wait for an in-flight revision change, so either we see the new revision here or
+            # its REVISION job sees these rows.
             current_rev = await s.scalar(text(
-                "SELECT character_rev FROM ai_conversation WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e"
+                "SELECT character_rev FROM ai_conversation WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e "
+                "FOR SHARE"
             ), scope)
             if current_rev is not None and current_rev > character_rev:
                 await enqueue_job(s, "REVISION", job.tenant_id, job.owner_id, job.conversation_id, job.epoch,

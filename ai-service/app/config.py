@@ -12,7 +12,8 @@ from app.tuning import Tuning, deep_merge
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AI_", env_file=".env", extra="ignore", env_nested_delimiter="__")
+    model_config = SettingsConfigDict(env_prefix="AI_", env_file=".env", extra="ignore", env_nested_delimiter="__",
+                                      env_ignore_empty=True)
 
     env: str = "local"
     database_url: str = "postgresql+asyncpg://ai:ai@localhost:5432/ai"
@@ -89,6 +90,9 @@ class Settings(BaseSettings):
     # made by a different AI_EMBEDDING_MODEL. 0 disables the sweep (memory jobs still retry their own).
     reindex_interval_seconds: float = 60.0
     reindex_sweep_batch: int = 32
+    # Failed revision checks (model down) are re-queued after this long; until then the conversation's
+    # unchecked character facts stay hidden.
+    revision_retry_after_seconds: float = 300.0
 
     # Data-decided tuning values with defaults (app/tuning.py, docs/tuning.md)
     tuning_file: str | None = None

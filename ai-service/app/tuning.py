@@ -77,6 +77,7 @@ class RelationshipTuning(_T):
     def _merge_deltas(cls, v: Any) -> Any:
         if not isinstance(v, dict):
             return v
+        v = {str(k).upper(): d for k, d in v.items()}  # env keys arrive lower-cased
         unknown = set(v) - set(DEFAULT_DELTAS)
         if unknown:
             raise ValueError(f"unknown relation kinds: {sorted(unknown)}")

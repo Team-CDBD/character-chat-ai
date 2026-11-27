@@ -39,15 +39,28 @@ def build_counter(settings: Settings, provider: ModelProvider) -> TokenCounter:
             return TokenCounter(exact=exact, exact_source="exact:tiktoken")
     if provider.name == "mock":
         return TokenCounter(calibrate=False, fallback=provider.count_tokens)
-    return TokenCounter(calibrate=settings.token_calibration, fallback=provider.count_tokens)
+    limit = settings.ollama_num_ctx if settings.provider == "ollama" else None
+    return TokenCounter(calibrate=settings.token_calibration, fallback=provider.count_tokens, context_limit=limit)
+
+
+TEMPLATE_TOKENS_PER_MESSAGE = 6  # chat-template markers per message (Gemma: <start_of_turn>role ... <end_of_turn>)
+TEMPLATE_TOKENS_FIXED = 8  # BOS + generation prompt
+
+
+def template_reserve(settings: Settings) -> int:
+    """Tokens the chat template adds on top of the counted content: 2 system messages, the current user
+    message and up to 2 messages per turn of the (possibly widened) recent window."""
+    messages = 3 + 2 * (settings.recent_window_turns + 1)
+    return TEMPLATE_TOKENS_PER_MESSAGE * messages + TEMPLATE_TOKENS_FIXED
 
 
 def check_context_fits(settings: Settings) -> None:
     ctx = settings.tuning.context
-    if settings.provider == "ollama" and ctx.input_budget + ctx.output_tokens > settings.ollama_num_ctx:
+    need = ctx.input_budget + ctx.output_tokens + template_reserve(settings)
+    if settings.provider == "ollama" and need > settings.ollama_num_ctx:
         raise ValueError(
-            f"context budget {ctx.input_budget} + output {ctx.output_tokens} tokens exceeds "
-            f"AI_OLLAMA_NUM_CTX={settings.ollama_num_ctx}"
+            f"context budget {ctx.input_budget} + output {ctx.output_tokens} + template "
+            f"{template_reserve(settings)} tokens exceeds AI_OLLAMA_NUM_CTX={settings.ollama_num_ctx}"
         )
 
 

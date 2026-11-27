@@ -91,7 +91,7 @@ python -m tools.show_tuning      # 지금 적용된 값과 버전 해시 확인
 Ollama에서는 `입력 예산 합계 + output_tokens`가 `AI_OLLAMA_NUM_CTX`(기본 8192)를 넘으면 시작할 때 오류를 냅니다.
 
 ### memory — 기억 파이프라인 (`memory/*.py`)
-결정 근거: 추출 precision, 턴당 비용, 장애 시 재시도 비용.
+결정 근거: 추출 precision, 턴당 비용, 장애 시 재시도 비용, 캐릭터 수정 시 검사 비용.
 
 | 키 | 기본값 | 의미 |
 |---|---|---|
@@ -110,3 +110,4 @@ Ollama에서는 `입력 예산 합계 + output_tokens`가 `AI_OLLAMA_NUM_CTX`(�
 | `AI_TOKEN_CALIBRATION` | true | 토크나이저가 없을 때 공급자가 알려준 실제 토큰 수로 추정 비율을 보정 |
 | `AI_REINDEX_INTERVAL_SECONDS` | 60 | 워커의 재색인 스윕 주기. 0이면 끔 |
 | `AI_REINDEX_SWEEP_BATCH` | 32 | 스윕 한 번의 임베딩 호출당 기억 수 |
+| `AI_REVISION_RETRY_AFTER_SECONDS` | 300 | 실패한 설정 충돌 검사를 다시 대기열에 넣기까지 기다리는 시간 |

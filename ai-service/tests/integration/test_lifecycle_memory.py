@@ -464,8 +464,152 @@ async def test_reindex_skips_revoked_conversations_and_survives_outage(client, s
     mock.embed = down
     result = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
     assert (result.embedded, result.failed, result.remaining) == (0, 1, 1)
-    assert await rows(services, "SELECT index_status, embedding_version FROM memory") == [("INDEXED", "mock-embed")]
+    assert await rows(services, "SELECT index_status, embedding_version FROM memory") == [("FAILED", "mock-embed")]
     mock.embed = real_embed
     await post(client, conv.reset())
     await drain(services)
     assert (await stale_counts(services.db, "mock-embed-v2")).remaining == 0
+
+
+def _judge_job_conflicts(msgs):
+    """Conflict when the new card says 직장인 and the memory says 대학생."""
+    body = msgs[-1].content
+    new_card = body.split("<character>")[1]
+    if "직장인" not in new_card:
+        return {"conflicts": []}
+    return {"conflicts": [{"id": line.split("id=")[1].split(":")[0], "reason": "직업"}
+                          for line in body.splitlines() if line.startswith("- id=") and "대학생" in line]}
+
+
+async def _conversation_with_character_facts(client, services, mock):
+    conv = MockConversation()
+    await post(client, conv.opened())
+    mock.json_scripts["extract-v1"] = _character_memories_script
+    await post(client, conv.committed(1, "너 요즘 학교 다니면서 뭐 해?", "나는 대학생이야. 라면을 제일 좋아해. 한강 산책 또 가자", DAY1))
+    await drain(services)
+    return conv
+
+
+async def test_reverted_edit_brings_conflicting_memory_back(client, services, mock):
+    conv = await _conversation_with_character_facts(client, services, mock)
+    mock.json_scripts["revision-check-v1"] = _judge_job_conflicts
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert await rows(services, "SELECT conflicts_with_revision FROM memory WHERE predicate='직업'") == [(2,)]
+    await post(client, conv.revision_changed(HYUNWOO))  # edit undone
+    await drain(services)
+    assert await rows(services, "SELECT checked_character_rev, conflicts_with_revision FROM memory "
+                                "WHERE predicate='직업'") == [(3, None)]
+    assert "직업: 대학생" in await _memories_in_prompt(client, services, mock, conv, 2)
+
+
+async def test_slow_check_for_older_edit_cannot_undo_newer_edit(client, services, mock):
+    from app.lifecycle.handler import process_pending
+
+    conv = await _conversation_with_character_facts(client, services, mock)
+    real = mock.complete_json
+    calls: list[str] = []
+
+    async def slow_first_call(messages, params, schema_name):
+        if schema_name == "revision-check-v1":
+            calls.append(messages[-1].content)
+            if len(calls) == 1:  # while judging rev2, the user edits again (rev3 reverts the job)
+                await post(client, conv.revision_changed(HYUNWOO | {"background": "대학원생"}))
+                await process_pending(services.db, tuning=services.settings.tuning)
+                return {"conflicts": [{"id": line.split("id=")[1].split(":")[0]}
+                                      for line in messages[-1].content.splitlines() if line.startswith("- id=")]}
+        return await real(messages, params, schema_name)
+
+    mock.complete_json = slow_first_call
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert len(calls) == 2 and "-> 대학원생" in calls[1]  # judged again against the newer card
+    assert await rows(services, "SELECT DISTINCT checked_character_rev, conflicts_with_revision FROM memory "
+                                "WHERE subject <> 'user'") == [(3, None)]
+    assert await rows(services, "SELECT status, count(*) FROM ai_job WHERE kind='REVISION' GROUP BY 1") == [
+        ("COMPLETED", 2)]
+
+
+async def test_only_one_revision_check_runs_per_conversation(client, services, mock):
+    from app.persistence import jobs
+
+    conv = await _conversation_with_character_facts(client, services, mock)
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "대학원생"}))
+    await drain(services, memory=False)
+    first = await jobs.claim(services.db, "REVISION", "w1", 30)
+    assert first is not None
+    assert await jobs.claim(services.db, "REVISION", "w2", 30) is None
+
+
+async def test_failed_revision_check_is_requeued_later(client, services, mock):
+    from app.persistence import jobs
+    from app.providers.base import ProviderError
+
+    conv = await _conversation_with_character_facts(client, services, mock)
+
+    def down(_):
+        raise ProviderError("model down")
+
+    mock.json_scripts["revision-check-v1"] = down
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert await jobs.requeue_failed_revisions(services.db, after_seconds=3600) == 0  # not yet
+    mock.json_scripts["revision-check-v1"] = _judge_job_conflicts
+    assert await jobs.requeue_failed_revisions(services.db, after_seconds=0) == 1
+    await drain(services)
+    assert await rows(services, "SELECT predicate, checked_character_rev, conflicts_with_revision FROM memory "
+                                "WHERE subject <> 'user' ORDER BY predicate") == [
+        ("좋아하는 음식", 2, None), ("직업", 1, 2), ("함께한 일", 2, None)]
+
+
+async def test_one_bad_memory_does_not_block_the_reindex_sweep(client, services, mock):
+    from app.memory.reindex import reindex_all
+    from app.providers.base import ProviderError
+
+    await _conversation_with_character_facts(client, services, mock)
+    real_embed = mock.embed
+
+    async def rejects_ramen(texts, model):
+        if any("라면" in t for t in texts):
+            raise ProviderError("input rejected")
+        return await real_embed(texts, model)
+
+    mock.embed = rejects_ramen
+    result = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
+    assert (result.embedded, result.failed, result.remaining) == (2, 1, 1)
+    assert await rows(services, "SELECT predicate, index_status, embedding_version FROM memory ORDER BY predicate") == [
+        ("좋아하는 음식", "FAILED", "mock-embed"), ("직업", "INDEXED", "mock-embed-v2"),
+        ("함께한 일", "INDEXED", "mock-embed-v2")]
+
+
+async def test_reindex_sweep_runs_once_across_workers_and_yields_to_users(client, services, mock):
+    from app.memory.reindex import reindex_all, sweep_lock
+
+    conv = await _conversation_with_character_facts(client, services, mock)
+    async with sweep_lock(services.db) as got:
+        assert got
+        busy = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
+        assert busy.locked and busy.embedded == 0
+    await client.post(f"{API}/generations", json=conv.generation(2, "안녕", DAY1))  # queued, not run
+    waiting = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10, yield_to_generation=True)
+    assert waiting.embedded == 0 and waiting.remaining == 3
+    await drain(services)
+    done = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10, yield_to_generation=True)
+    assert (done.embedded, done.remaining) == (3, 0)
+
+
+async def test_mixed_vector_dimensions_during_model_switch(client, services, mock):
+    from app.providers.mock import hash_embed
+
+    conv = await _conversation_with_character_facts(client, services, mock)
+
+    async def small(texts, model):
+        return [hash_embed(t, dim=16) for t in texts], (await mock.__class__.embed(mock, texts, model))[1]
+
+    mock.embed = small
+    services.settings.embedding_model = "mock-embed-16"
+    job = (await client.post(f"{API}/generations", json=conv.generation(2, "라면 좋아해?", DAY1))).json()["aiJobId"]
+    await drain(services)
+    body = (await client.get(f"{API}/generations/{job}")).json()
+    assert body["status"] == "COMPLETED" and "KEYWORD_FALLBACK" in body["degraded"]
