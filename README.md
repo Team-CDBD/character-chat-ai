@@ -144,7 +144,7 @@ sequenceDiagram
 | `lifecycle/` | Inbox 중복 제거, `aggregateSeq` 순서 보장, Projection, 초기화·삭제 | gap을 건너뛰지 않음. 차단된 epoch로의 쓰기 거부 |
 | `memory/` | Pre-filter, 추출 결과 검증, supersedes·중복 처리, 임베딩, Rolling Summary | 근거 없는 사용자 사실 저장 금지. 모델 출력으로 SQL·권한·설정을 바꾸지 않음 |
 | `relationship/` | 결정적 관계 Reducer, 단계(히스테리시스), 미완료 사건 수명주기 | 메시지 수로 친밀도 증가 금지. 관계가 성격을 덮어쓰지 않음 |
-| `providers/` | 공급자 오류·timeout·usage 표준화, 동시성 슬롯, Mock | 공급자별 차이를 바깥으로 새지 않게 격리 |
+| `providers/` | 공급자 오류·timeout·usage 표준화, 동시성 슬롯, Mock · OpenAI | 공급자별 차이를 바깥으로 새지 않게 격리 |
 | `persistence/` | 스키마, Job claim·lease·fencing, Alembic 마이그레이션 | — |
 | `workers/` | lifecycle 루프 · 생성 슬롯 · 기억 슬롯 | — |
 
@@ -166,7 +166,7 @@ sequenceDiagram
 - 입력 합계 상한은 **7,260 토큰**(출력 600은 별도)입니다. 넘으면 **관련도 낮은 기억 → 요약 앞부분 → 최근 창(최소 3턴)** 순서로 줄입니다. 그래도 넘는 아주 긴 메시지는 실패시키지 않고 최근 창을 1턴까지 줄이며 `RECENT_BELOW_MINIMUM`을 기록합니다. 그래도 안 되면 `BUDGET_EXCEEDED`.
 - 프롬프트는 **변하지 않는 계층(1~3)을 첫 system 메시지**, 변하는 계층(4~7)을 두 번째 system 메시지로 둡니다. 공급자의 프롬프트 캐싱으로 입력 비용과 첫 토큰 지연을 줄이기 위해서입니다.
 - 조립한 Context는 **`context_snapshot`에 불변으로 저장**하고 hash를 남깁니다(24시간 보존). Regenerate는 이 스냅샷을 그대로 재사용합니다.
-- 토큰 수는 모델이 정해질 때까지 `글자 수 / 1.5` 추정치를 씁니다. 모델 선정 후 공식 토크나이저로 바꿉니다.
+- Context 예산 계산의 토큰 수는 OpenAI를 써도 아직 `글자 수 / 1.5` 추정치입니다. 모델을 확정하면 공식 토크나이저로 바꿉니다. 사용량 기록(`usage_ledger`)은 공급자가 보고한 값을 우선합니다.
 
 **Output Policy** (`output_policy.py`): 모델 출력은 문장 끝(또는 80자)까지 버퍼링한 뒤 검사하고 나서 내보냅니다. "저는 AI라서…" 같은 역할 이탈(`ROLE_BREAK`)과 반말 설정에서의 존댓말(`SPEECH_STYLE_HONORIFIC`)은 MVP에서는 **차단하지 않고 표시만** 해서 결과의 `degraded` 목록과 지표로 남깁니다. 빈 답변은 `POLICY_BLOCKED`입니다.
 
@@ -320,7 +320,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | 언어·API | Python 3.12, FastAPI, Pydantic v2 |
 | DB | PostgreSQL 16 + pgvector (메타데이터·출처·벡터를 한 트랜잭션에서), SQLAlchemy 2 async + asyncpg, Alembic |
 | 작업 실행 | DB Job 테이블 + 자체 Worker 루프. Redis·브로커 없음 |
-| 모델 | Provider Adapter 뒤에 Mock. 역할별 티어(생성=상위, 추출·요약=경량, 임베딩=다국어)로 설정 분리 |
+| 모델 | Provider Adapter 뒤에 `mock`(기본) 또는 `openai`(`AI_PROVIDER`). 역할별 모델을 `AI_CHAT_MODEL`·`AI_EXTRACT_MODEL`·`AI_EMBEDDING_MODEL`로 분리 |
 | 파이프라인 | 명시적 함수 조합. 자율 Agent 프레임워크 없음 |
 | 테스트 | pytest 단위 + 실제 PostgreSQL 통합 테스트, 계약 fixture 검사, GitHub Actions |
 
@@ -358,7 +358,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 5. 사용자 일 단위 토큰 한도는 BE 원장이 소유합니다. AI는 `usage_ledger`에 용도별 사용량만 남깁니다.
 
 ### 아직 열어 둔 것 (데이터로 결정)
-- 구체 모델과 공급자 (한국어 평가셋으로 선정), 공식 토크나이저
+- 최종 모델과 공급자 (OpenAI 연결은 됐지만 한국어 평가셋으로 비교·확정 전), 공식 토크나이저
 - 관계 사건 변화량·단계 경계값, 검색 가중치·게이트 임계값, 최근 창 W와 요약 주기
 - ANN 인덱스·별도 Vector DB 도입, Retriever·NLU 독립 서비스화
 - 설정과 충돌하는 기억 표시(`conflicts_with_revision`): 컬럼과 검색 제외는 있지만 표시하는 로직은 아직 없음
@@ -373,7 +373,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | P1 기본 생성 경로 | 🟡 | 실제 키로 종단 검증, 모델 2~3종 비교 리포트 |
 | P2 캐릭터 품질 | 🟡 | 충돌 기억 표시, 일관성 평가 기준선 |
 | P3 장시간 대화 | 🟡 | 100턴 시나리오 검증 |
-| P4 Long-term Memory | 🟡 | 실제 추출 모델, precision·recall 리포트, 임베딩 별도 Job |
+| P4 Long-term Memory | 🟡 | 추출 모델 확정(OpenAI 연결됨), precision·recall 리포트, 임베딩 별도 Job |
 | P5 Relationship·미완료 사건 | 🟡 | 실제 모델 baseline, 변화량 튜닝 |
 | P6 재방문·초기화·삭제 | 🟡 | 삭제 영수증 상세, 운영 지표 대시보드 |
 | P7 통합·부하·베타 | ⬜ | 실제 BE 계약 테스트, 부하·장애 주입 시험 |
@@ -402,7 +402,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | 샘플 캐릭터·Persona·tenant | `mock_be.py` 상수 | BE 원본 데이터 | BE |
 | 서비스 토큰 `local-dev-token` | `AI_SERVICE_TOKENS` | 환경별 비밀값 | BE·AI |
 | 사용자 일일 토큰 한도 | 없음 | BE 원장 | BE |
-| 생성·추출·요약·baseline·임베딩 | `app/providers/mock.py` | 평가로 고른 실제 모델 | AI |
+| 생성·추출·요약·baseline·임베딩 | `app/providers/mock.py` (기본값) | `AI_PROVIDER=openai`로 OpenAI 사용 가능 ([실행 방법](ai-service/README.md#openai로-실행)). 최종 모델은 평가 후 확정 | AI |
 | 토큰 수 `글자 수 / 1.5` | `providers/base.py` | 공식 토크나이저 | AI |
 
-MockProvider는 추출 스크립트가 없으면 빈 결과를 돌려주므로 demo로는 기억이 쌓이지 않습니다. 기억 경로는 통합 테스트가 스크립트를 넣어 검증합니다.
+기본값인 MockProvider는 추출 스크립트가 없으면 빈 결과를 돌려주므로 mock 설정의 demo로는 기억이 쌓이지 않습니다. 기억 경로는 통합 테스트가 스크립트를 넣어 검증하고, OpenAI 설정으로 돌리면 실제 추출이 일어납니다(대화 내용이 공급자로 전송되고 요금이 발생). 임베딩 모델을 바꾸면 벡터 차원과 `embedding_version`이 달라져 기존 기억은 재색인 전까지 키워드 점수로 검색됩니다.

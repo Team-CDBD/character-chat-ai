@@ -4,7 +4,7 @@
 
 - Python 3.12 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) · PostgreSQL 16 + pgvector · Alembic
 - 작업 실행: DB Job 테이블 + 자체 Worker 루프 (`FOR UPDATE SKIP LOCKED`, lease, fencing token). Redis·브로커 없음
-- 모델: 아직 미정 → `MockProvider` 로 전 경로가 동작. 실제 공급자는 W2 한국어 평가 후 `app/providers/` 에 추가
+- 모델: 기본은 `MockProvider` 로 전 경로가 동작. `AI_PROVIDER=openai` 로 OpenAI 채팅·추출·임베딩 사용 가능 ([OpenAI로 실행](#openai로-실행)). 최종 모델은 한국어 평가 후 확정
 
 서버별 구조, 전체 플로우(Mermaid), 버튼으로 따라가는 인터랙티브 플로우, BE 연동 가이드는 [`../docs/architecture-flow.html`](../docs/architecture-flow.html)에 있습니다.
 
@@ -53,7 +53,7 @@ app/knowledge/      Retriever(하이브리드 점수 + 게이트), Context Build
 app/memory/         Pre-filter, 추출 결과 근거 검증, Memory Reducer(supersedes·중복), 기억 Pipeline(+요약·임베딩)
 app/relationship/   결정적 Relationship Reducer(변화량 표·상한·사건키·히스테리시스), 단계→행동 지침, 미완료 사건
 app/lifecycle/      Inbox, aggregateSeq 순서 보장, 초기화·삭제(차단표식 → fencing → 정리)
-app/providers/      Provider Adapter(timeout·동시성 슬롯·usage 표준화) + Mock
+app/providers/      Provider Adapter(timeout·동시성 슬롯·usage 표준화) + Mock · OpenAI
 app/persistence/    SQLAlchemy 모델, Job claim/lease/fencing, Alembic 마이그레이션
 app/workers/        lifecycle 루프 · 생성 슬롯 · 기억 슬롯 (한 프로세스, 슬롯 분리)
 prompts/            버전 관리 프롬프트 (chat-v1, extract-v1, summary-v1, baseline-v1)
