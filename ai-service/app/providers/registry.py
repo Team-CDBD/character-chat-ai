@@ -9,7 +9,8 @@ from app.providers.openai import OpenAIProvider
 
 def build_provider(settings: Settings) -> ModelProvider:
     if settings.provider == "ollama":
-        return OllamaProvider(settings.ollama_base_url, settings.provider_timeout_seconds)
+        return OllamaProvider(settings.ollama_base_url, settings.provider_timeout_seconds,
+                              num_ctx=settings.ollama_num_ctx)
     if settings.provider == "mock":
         return MockProvider(chunk_delay=0.02)
     if settings.provider == "openai":

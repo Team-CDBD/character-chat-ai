@@ -41,7 +41,7 @@ class WorkerRunner:
     async def lifecycle_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                n = await process_pending(self.sv.db, self.cfg.lifecycle_batch)
+                n = await process_pending(self.sv.db, self.cfg.lifecycle_batch, self.cfg.tuning)
             except Exception:
                 log.exception("lifecycle loop error")
                 n = 0

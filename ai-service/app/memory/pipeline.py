@@ -34,12 +34,11 @@ from app.relationship.reducer import (
     Stage,
     apply_relation_events,
     baseline_state,
+    default_baseline,
 )
 from app.services import Services
 
 log = logging.getLogger(__name__)
-MAX_RUNS = 3
-REINDEX_BATCH = 16  # earlier unindexed memories retried per memory job
 
 
 def _j(v: Any) -> str:
@@ -67,7 +66,7 @@ class MemoryPipeline:
         job = fenced.job
         try:
             async with self.sv.db.tx() as s:
-                if job.run_count < MAX_RUNS:
+                if job.run_count < self.cfg.tuning.memory.max_runs:
                     await fenced.guard(s, status="ACCEPTED", error_code="PROVIDER_ERROR")
                     return
                 # Give up on extraction for this turn but keep the watermark moving: the raw turn
@@ -97,10 +96,12 @@ class MemoryPipeline:
             ChatParams(model=self.cfg.extract_model, temperature=0),
             "baseline-v1",
         )
+        rel_tuning = self.cfg.tuning.relationship
         try:
-            base = baseline_state(float(result["trust"]), float(result["closeness"]), float(result.get("tension", 0)))
+            base = baseline_state(float(result["trust"]), float(result["closeness"]), float(result.get("tension", 0)),
+                                  rel_tuning)
         except (KeyError, TypeError, ValueError):
-            base = baseline_state(50, 40, 0)
+            base = default_baseline(rel_tuning)
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             await s.execute(
@@ -168,7 +169,7 @@ class MemoryPipeline:
         )
         report = None
         usage = None
-        if prefilter.worth_extracting(turn.user_text, turn.assistant_text):
+        if prefilter.worth_extracting(turn.user_text, turn.assistant_text, self.cfg.tuning.memory.prefilter_min_chars):
             raw, usage = await self.sv.provider.complete_json(
                 self._extract_messages(turn, turn_row["sent_at"], open_events),
                 ChatParams(model=self.cfg.extract_model, temperature=0),
@@ -220,7 +221,7 @@ class MemoryPipeline:
         ).all()
         existing = [ExistingMemory(*r) for r in existing_rows]
         inserted: list[tuple[str, str]] = []
-        for d in reduce(report.memories, existing):
+        for d in reduce(report.memories, existing, self.cfg.tuning.memory.max_new_per_turn):
             if d.action != "INSERT":
                 continue
             m = d.memory
@@ -322,6 +323,7 @@ class MemoryPipeline:
             state, proposals,
             ReduceContext(day=day, open_conflict=last_kind == "CONFLICT", resolved_shared_event=resolved_shared,
                           existing_keys=frozenset(keys)),
+            self.cfg.tuning.relationship,
         )
         for ev in applied:
             await s.execute(
@@ -399,7 +401,7 @@ class MemoryPipeline:
                 "AND valid_to IS NULL AND index_status <> 'INDEXED' AND source_turn_seq < :ts "
                 "ORDER BY created_at LIMIT :n"
             ), {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch,
-                "ts": job.turn_seq, "n": REINDEX_BATCH})).all()
+                "ts": job.turn_seq, "n": self.cfg.tuning.memory.reindex_batch})).all()
         return [(mid, body) for mid, body in rows if mid not in skip]
 
     async def _maybe_summarize(self, fenced: FencedJob) -> None:
