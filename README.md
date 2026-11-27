@@ -4,7 +4,7 @@
 
 > 실행 방법·디렉터리별 설명은 [`ai-service/README.md`](ai-service/README.md), BE와 주고받는 계약은 [`ai-service/contracts/README.md`](ai-service/contracts/README.md)를 보세요.
 >
-> **구조·플로우 문서 (HTML)**: [`docs/architecture-flow.html`](docs/architecture-flow.html)은 서버별 구성, Mermaid 다이어그램 11종(시퀀스·플로우·상태·ER), 버튼으로 단계를 따라가는 인터랙티브 플로우, Mock 현황과 BE 연동 가이드를 한 파일에 담았습니다. 레포를 받은 뒤 브라우저로 열면 됩니다(다이어그램은 jsDelivr의 mermaid를 불러옵니다). 요약은 [14장](#14-구조플로우-문서와-be-연동-현황)에 있습니다.
+> **구조·플로우 문서 (HTML)**: [`docs/architecture-flow.html`](docs/architecture-flow.html)은 서버별 구성, Mermaid 다이어그램 12종(시퀀스·플로우·상태·ER, 카드 수정 후 충돌 점검 포함), 버튼으로 단계를 따라가는 인터랙티브 플로우, Mock 현황과 BE 연동 가이드를 한 파일에 담았습니다. 레포를 받은 뒤 브라우저로 열면 됩니다(다이어그램은 jsDelivr의 mermaid를 불러옵니다). 요약은 [14장](#14-구조플로우-문서와-be-연동-현황)에 있습니다.
 
 ## 목차
 1. [이 서비스가 책임지는 것](#1-이-서비스가-책임지는-것)
@@ -418,6 +418,7 @@ Ollama는 로컬 추론이라 한 번에 한 호출만 보내고 lease를 길게
 | 샘플 캐릭터·Persona·tenant | `mock_be.py` 상수 | BE 원본 데이터 | BE |
 | 서비스 토큰 `local-dev-token` | `AI_SERVICE_TOKENS` | 환경별 비밀값 | BE·AI |
 | 사용자 일일 토큰 한도 | 없음 | BE 원장 | BE |
-| 토큰 수 `글자 수 / 1.5` | `providers/base.py` | 공식 토크나이저 | AI |
+| 토큰 수 (토크나이저 파일 없을 때) | `providers/tokens.py` 보정 추정 | Gemma `tokenizer.json`을 `AI_TOKENIZER_FILE`로 배포해 정확히 세기 | AI |
+| 튜닝 값 (검색 가중치·관계 변화량·예산 등) | `app/tuning.py` 기본값 | 평가 데이터로 조정 ([tuning.md](ai-service/docs/tuning.md)) | AI |
 
 모델은 더 이상 Mock이 기본이 아닙니다. 기본 Ollama로 demo를 돌리면 Gemma 4 12B가 실제로 답하고 기억을 추출합니다(모델을 먼저 `ollama pull` 해야 함). `AI_PROVIDER=mock`으로 바꾸면 추출 스크립트가 없어 기억이 쌓이지 않고, 통합 테스트는 mock에 스크립트를 넣어 검증합니다. OpenAI를 쓰면 대화 내용이 공급자로 전송되고 요금이 발생합니다. 공급자나 임베딩 모델을 바꾸면 벡터 차원과 `embedding_version`이 달라져 기존 기억은 재색인 전까지 키워드 점수로 검색됩니다.
