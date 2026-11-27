@@ -386,8 +386,8 @@ async def test_character_edit_hides_only_conflicting_memories(client, services, 
     memories = await _memories_in_prompt(client, services, mock, conv, 2)
     assert "좋아하는 음식: 라면" in memories and "함께한 일: 한강 산책" in memories
     assert "직업: 대학생" not in memories
-    assert await rows(services, "SELECT predicate, checked_character_rev, conflicts_with_revision FROM memory "
-                                "ORDER BY predicate") == [("좋아하는 음식", 2, None), ("직업", 1, 2), ("함께한 일", 2, None)]
+    assert sorted(await rows(services, "SELECT predicate, checked_character_rev, conflicts_with_revision FROM memory "
+                                "")) == sorted([("좋아하는 음식", 2, None), ("직업", 1, 2), ("함께한 일", 2, None)])
     assert await rows(services, "SELECT count(*) FROM usage_ledger WHERE purpose='revision'") == [(1,)]
 
 
@@ -558,9 +558,9 @@ async def test_failed_revision_check_is_requeued_later(client, services, mock):
     mock.json_scripts["revision-check-v1"] = _judge_job_conflicts
     assert await jobs.requeue_failed_revisions(services.db, after_seconds=0) == 1
     await drain(services)
-    assert await rows(services, "SELECT predicate, checked_character_rev, conflicts_with_revision FROM memory "
-                                "WHERE subject <> 'user' ORDER BY predicate") == [
-        ("좋아하는 음식", 2, None), ("직업", 1, 2), ("함께한 일", 2, None)]
+    assert sorted(await rows(services, "SELECT predicate, checked_character_rev, conflicts_with_revision FROM memory "
+                                "WHERE subject <> 'user'")) == sorted([
+        ("좋아하는 음식", 2, None), ("직업", 1, 2), ("함께한 일", 2, None)])
 
 
 async def test_one_bad_memory_does_not_block_the_reindex_sweep(client, services, mock):
@@ -578,9 +578,9 @@ async def test_one_bad_memory_does_not_block_the_reindex_sweep(client, services,
     mock.embed = rejects_ramen
     result = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
     assert (result.embedded, result.failed, result.remaining) == (2, 1, 1)
-    assert await rows(services, "SELECT predicate, index_status, embedding_version FROM memory ORDER BY predicate") == [
+    assert sorted(await rows(services, "SELECT predicate, index_status, embedding_version FROM memory")) == sorted([
         ("좋아하는 음식", "FAILED", "mock-embed"), ("직업", "INDEXED", "mock-embed-v2"),
-        ("함께한 일", "INDEXED", "mock-embed-v2")]
+        ("함께한 일", "INDEXED", "mock-embed-v2")])
 
 
 async def test_reindex_sweep_runs_once_across_workers_and_yields_to_users(client, services, mock):
