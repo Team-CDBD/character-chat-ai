@@ -4,12 +4,17 @@
 
 - Python 3.12 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) · PostgreSQL 16 + pgvector · Alembic
 - 작업 실행: DB Job 테이블 + 자체 Worker 루프 (`FOR UPDATE SKIP LOCKED`, lease, fencing token). Redis·브로커 없음
-- 모델: 아직 미정 → `MockProvider` 로 전 경로가 동작. 실제 공급자는 W2 한국어 평가 후 `app/providers/` 에 추가
+- 모델: 기본 Ollama (Gemma 4 12B), 선택 OpenAI 또는 Mock
 
 ## 빠르게 실행하기
 
 ```bash
-# 1) docker로 전체 실행 (api + worker + postgres/pgvector)
+# 1) Ollama 기동 및 최초 모델 다운로드
+docker compose -f infra/docker-compose.yml --profile ollama up -d ollama
+docker compose -f infra/docker-compose.yml exec ollama ollama pull gemma4:12b
+docker compose -f infra/docker-compose.yml exec ollama ollama pull embeddinggemma
+
+# 2) API, worker, PostgreSQL 기동
 docker compose -f infra/docker-compose.yml up --build
 
 # 2) 다른 터미널에서 Mock BE로 대화 재생 (SSE 스트리밍 확인)
@@ -24,7 +29,7 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -e '.[dev]'
 export AI_DATABASE_URL=postgresql+asyncpg://ai:ai@localhost:5432/ai
 .venv/bin/alembic upgrade head
 .venv/bin/uvicorn app.main:app --port 8080      # ai-api
-.venv/bin/python -m app.workers.runner          # ai-worker (생성 8 슬롯 + 기억 4 슬롯 + lifecycle 루프)
+.venv/bin/python -m app.workers.runner          # ai-worker (생성·기억 슬롯과 lifecycle 루프)
 ```
 
 ## 테스트
@@ -77,7 +82,7 @@ infra/              docker-compose (로컬)
 | 단계 | 상태 |
 |---|---|
 | P0 계약·Mock·평가셋 | ✅ 계약 v1 스키마·fixture, Mock BE CLI, Mock Provider, docker-compose, 골든 시나리오 1개 (평가셋 20개는 남음) |
-| P1 기본 생성 경로 | ✅ 접수·조회·SSE·서비스 인증, Job lease/fencing, StreamEvent 재전송, Inbox·Projection / ⬜ 실제 모델 연결, 모델 비교 리포트 |
+| P1 기본 생성 경로 | ✅ 접수·조회·SSE·서비스 인증, Job lease/fencing, StreamEvent 재전송, Inbox·Projection / ⬜ 실기기 추론 검증, 모델 비교 리포트 |
 | P2 캐릭터 품질 | 🟡 chat-v1, Context Builder v1, Snapshot·Regenerate·Retry 분류, 청크 검사·역할 이탈 지표, revision 반영 / ⬜ 충돌 기억 표식(`conflicts_with_revision`) |
 | P3 장시간 대화 | 🟡 최근 창·축소 순서·Rolling Summary 기본 구현 / ⬜ 100턴 시나리오 검증 |
 | P4 Long-term Memory | 🟡 Pre-filter·근거 검증·supersedes·하이브리드 검색·게이트 / ⬜ 실제 추출 모델·precision 리포트, 임베딩 별도 Job 분리 |
@@ -91,3 +96,35 @@ infra/              docker-compose (로컬)
 2. `CharacterRevisionChanged` 는 대화 단위로 발행하고 캐릭터 카드·Persona 전체 사본을 담습니다 (Persona 변경도 같은 이벤트).
 3. 첫 장면은 `ConversationOpened.openingScene` 으로 받아 AI가 Turn 0으로 기록합니다. 초기화 시 BE는 `ConversationReset(oldEpoch, newEpoch)` 만 보내면 AI가 기존 설정·첫 장면으로 새 epoch를 엽니다.
 4. 오류 코드와 `retryable` 힌트는 `contracts/README.md` 표를 따릅니다. 최종 Retry 판단은 BE.
+
+## 공급자 전환
+
+실행할 공급자는 `AI_PROVIDER=ollama|openai|mock`로 선택한다. 진행 중인 작업이 끝난 뒤 API와 워커를 같은 설정으로 재시작한다. Compose에서는 아래 명령으로 설정을 다시 적용한다.
+
+```sh
+AI_PROVIDER=mock docker compose -f infra/docker-compose.yml up -d --build api worker
+```
+
+| 공급자 | 채팅·추출 기본 모델 | 임베딩 기본 모델 | 연결 |
+|---|---|---|---|
+| ollama | gemma4:12b | embeddinggemma | 로컬 Python은 localhost:11434, Compose는 ollama:11434 |
+| openai | gpt-4o-mini | text-embedding-3-small | AI_OPENAI_API_KEY 필요 |
+| mock | mock-chat / mock-extract | mock-embed | 오프라인 |
+
+Ollama 기본값은 워커 프로세스당 모델 호출 1개, 문맥 8192토큰이다. GPU로 구동 중인 별도 Ollama도 `AI_OLLAMA_BASE_URL`을 컨테이너에서 접근 가능한 주소로 지정해 사용할 수 있다. 기본 Compose Ollama 서비스는 CPU로 실행된다. 사용자 장비에서 속도와 메모리는 별도 측정해야 한다.
+
+모델을 직접 지정하려면 기존 공통 변수 `AI_CHAT_MODEL`, `AI_EXTRACT_MODEL`, `AI_EMBEDDING_MODEL`을 사용한다. 공급자를 바꿀 때 이 변수를 해제하면 표의 기본값을 따른다. 저장된 기억은 유지되며 다른 버전의 임베딩은 기존 키워드 검색으로 처리한다.
+
+## OpenAI로 실행
+
+OpenAI를 사용할 때는 아래 환경변수와
+`AI_OPENAI_API_KEY`를 실행 환경의 비밀 설정에 지정한다.
+채팅·추출 모델은 Chat Completions 스트리밍, temperature 및 JSON 객체 출력을 지원해야 한다.
+
+```sh
+export AI_PROVIDER=openai
+docker compose -f infra/docker-compose.yml up --build
+```
+
+실제 대화와 기억 추출 입력은 설정한 제공자에게 전송되고 API 요금이 발생한다.
+생성 사용량은 공급자가 보고한 값을 우선하며 누락 시 기존 토큰 추정치를 사용한다.
