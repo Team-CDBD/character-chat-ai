@@ -6,13 +6,19 @@ name: character-chat-ai
 x-ai-env: &ai-env
   AI_DATABASE_URL: postgresql+asyncpg://ai:ai@db:5432/ai
   AI_SERVICE_TOKENS: '["local-dev-token"]'
-  AI_PROVIDER: ${AI_PROVIDER:-mock}
-  AI_CHAT_MODEL: ${AI_CHAT_MODEL:-mock-chat}
-  AI_EXTRACT_MODEL: ${AI_EXTRACT_MODEL:-mock-extract}
-  AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-mock-embed}
+  AI_PROVIDER: ${AI_PROVIDER:-ollama}
+  AI_CHAT_MODEL:
+  AI_EXTRACT_MODEL:
+  AI_EMBEDDING_MODEL:
+  AI_OLLAMA_BASE_URL: ${AI_OLLAMA_BASE_URL:-http://ollama:11434}
   AI_OPENAI_API_KEY: ${AI_OPENAI_API_KEY:-}
 
 services:
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [ollama]
+    volumes: [ollama-models:/root/.ollama]
+
   db:
     image: pgvector/pgvector:pg16
     environment:
@@ -48,4 +54,5 @@ services:
       migrate: { condition: service_completed_successfully }
 
 volumes:
+  ollama-models:
   ai-db:

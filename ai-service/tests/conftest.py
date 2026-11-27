@@ -58,6 +58,7 @@ def migrated_db() -> str:
 @pytest_asyncio.fixture
 async def services(migrated_db: str):
     settings = Settings(
+        provider="mock",
         database_url=migrated_db,
         service_tokens=[TOKEN],
         poll_interval_seconds=0.01,
