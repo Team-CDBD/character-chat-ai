@@ -25,7 +25,7 @@ from app.knowledge.context_builder import (
     build,
 )
 from app.knowledge.output_policy import ChunkPolicy, PolicyBlocked, expects_banmal
-from app.knowledge.retriever import CHARACTER_REVISION_FILTER, Scope, retrieve
+from app.knowledge.retriever import Scope, retrieve
 from app.persistence.jobs import ClaimedJob, FencedJob, LeaseLost, utcnow
 from app.persistence.models import new_id
 from app.providers.base import ChatParams, PromptMessage, ProviderError, ProviderTimeout
@@ -278,10 +278,11 @@ class DialogueManager:
                 if query_vec
                 else "0"
             )
+            # Open promises/plans survive a character edit (unlike character facts in retrieval):
+            # an edit does not cancel what the two already agreed to do.
             open_params: dict[str, Any] = {
                 "t": req.tenant_id, "o": req.owner_id, "c": req.conversation_id, "e": req.epoch,
             }
-            open_params["cr"] = req.character_revision
             if query_vec:
                 open_params |= {"ev": self.cfg.embedding_model, "q": json.dumps(query_vec)}
             open_rows = (
@@ -291,7 +292,7 @@ class DialogueManager:
                         SELECT u.id, u.title, u.status, u.due_at, u.created_at, {sim_sql} AS sim
                         FROM unfinished_event u JOIN memory m ON m.id = u.memory_id
                         WHERE u.tenant_id=:t AND u.owner_id=:o AND u.conversation_id=:c AND u.epoch=:e
-                          AND u.status = 'OPEN' AND {CHARACTER_REVISION_FILTER}
+                          AND u.status = 'OPEN'
                         """
                     ),
                     open_params,

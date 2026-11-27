@@ -85,3 +85,41 @@ def test_short_self_disclosures_reach_extraction():
 def test_preference_cannot_reverse_quoted_dislike():
     result = validate(parse_extraction({"memories": [mem(predicate="likes")]}), TURN, set())
     assert result.rejected == [("memory", "unsupported_preference")]
+
+
+def test_prefilter_covers_tense_and_spacing_without_keyword_false_positive():
+    for text in ("부산에 살았어", "서울 살아", "강아지 키운다"):
+        assert worth_extracting(text, ""), text
+    assert not worth_extracting("키워드 뭐였지", "")
+
+
+def test_preference_contradiction_checks_the_words_after_the_target():
+    cases = [
+        ("likes", "민트초코 진짜 싫어해", False),
+        ("likes", "민트초코 싫어해요 ㅋㅋ", False),
+        ("likes", "나 민트초코 싫어", False),
+        ("likes", "민트초코 싫어하는데", False),
+        ("likes", "민트초코 좋아하는 사람 싫어", True),
+        ("dislikes", "민트초코 안 좋아해", True),
+        ("dislikes", "민트초코 좋아해", False),
+    ]
+    for predicate, evidence, accepted in cases:
+        turn = TurnText(11, "u11", evidence, "a11", "응")
+        result = validate(parse_extraction({"memories": [mem(predicate=predicate, evidence=evidence)]}), turn, set())
+        assert (result.memories != []) is accepted, (predicate, evidence)
+    turn = TurnText(11, "u11", "민트초코 싫어해 근데 딸기는 좋아", "a11", "응")
+    out = parse_extraction({"memories": [mem(predicate="likes", value="딸기", evidence="민트초코 싫어해 근데 딸기는 좋아")]})
+    assert len(validate(out, turn, set()).memories) == 1
+
+
+def test_subject_is_normalized_so_revision_filter_cannot_be_bypassed():
+    turn = TurnText(11, "u11", "나 민트초코 싫어해", "a11", "나는 대학생이야")
+    out = parse_extraction({"memories": [
+        mem(type="SHARED_EVENT", subject="assistant", predicate="job", value="대학생", evidence="대학생이야",
+            sourceMessageIds=["a11"]),
+        mem(type="SHARED_EVENT", subject="hyunwoo", predicate="job", value="대학생", evidence="대학생이야",
+            sourceMessageIds=["a11"]),
+        mem(type="SHARED_EVENT", subject="both", predicate="plan", value="영화", evidence="대학생이야",
+            sourceMessageIds=["a11"]),
+    ]})
+    assert [m.subject for m in validate(out, turn, set()).memories] == ["character", "character", "shared"]

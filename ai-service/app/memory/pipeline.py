@@ -39,6 +39,7 @@ from app.services import Services
 
 log = logging.getLogger(__name__)
 MAX_RUNS = 3
+REINDEX_BATCH = 16  # earlier unindexed memories retried per memory job
 
 
 def _j(v: Any) -> str:
@@ -188,6 +189,7 @@ class MemoryPipeline:
         await self._finish_memory(fenced, new_memory_ids)
 
     async def _finish_memory(self, fenced: FencedJob, pending: list[tuple[str, str]]) -> None:
+        pending = pending + await self._reindex_backlog(fenced, {mid for mid, _ in pending})
         if pending:
             await self._embed(fenced, pending)
         await self._maybe_summarize(fenced)
@@ -360,7 +362,8 @@ class MemoryPipeline:
         )
 
     async def _embed(self, fenced: FencedJob, items: list[tuple[str, str]]) -> None:
-        """Embedding failure never loses the structured memory: it stays PENDING and keyword search covers it."""
+        """Embedding failure never loses the structured memory or fails the job: rows are marked FAILED,
+        keyword search covers them, and the next memory job of the conversation retries them."""
         job = fenced.job
         try:
             vectors, usage = await self.sv.provider.embed([t for _, t in items], self.cfg.embedding_model)
@@ -370,7 +373,9 @@ class MemoryPipeline:
                 await s.execute(
                     text("UPDATE memory SET index_status='FAILED' WHERE id = ANY(:ids)"), {"ids": [i for i, _ in items]}
                 )
-            raise
+            # Not a job failure: extraction is already committed. The next memory job of this
+            # conversation retries these rows (see _reindex_backlog).
+            return
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             for (mid, _), vec in zip(items, vectors, strict=True):
@@ -383,6 +388,19 @@ class MemoryPipeline:
                 )
             await self._ledger(s, job, "embed", usage)
             await self._advance_watermark(s, job, embedding=True)
+
+    async def _reindex_backlog(self, fenced: FencedJob, skip: set[str]) -> list[tuple[str, str]]:
+        """Earlier memories of this conversation whose embedding failed or never ran."""
+        job = fenced.job
+        async with self.sv.db.session() as s:
+            rows = (await s.execute(text(
+                "SELECT id, concat_ws(' ', predicate, value, evidence) FROM memory "
+                "WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c AND epoch=:e "
+                "AND valid_to IS NULL AND index_status <> 'INDEXED' AND source_turn_seq < :ts "
+                "ORDER BY created_at LIMIT :n"
+            ), {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch,
+                "ts": job.turn_seq, "n": REINDEX_BATCH})).all()
+        return [(mid, body) for mid, body in rows if mid not in skip]
 
     async def _maybe_summarize(self, fenced: FencedJob) -> None:
         """Roll turns that left the recent window into a summary every ``summary_every_turns`` turns."""

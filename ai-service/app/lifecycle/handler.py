@@ -44,6 +44,7 @@ def _j(v: Any) -> str:
 
 async def receive_event(db: Database, event: Any) -> str:
     payload = event.payload.model_dump(by_alias=True, mode="json")
+    conversation_id = payload.get("conversationId")
     async with db.tx() as s:
         if "epoch" in payload:
             conversation = payload["conversationId"]
@@ -55,9 +56,9 @@ async def receive_event(db: Database, event: Any) -> str:
                 text(
                     """
                     INSERT INTO event_inbox (id, event_id, tenant_id, owner_id, aggregate_type, aggregate_id,
-                                             aggregate_seq, type, payload, status, received_at)
-                    VALUES (:id, :event_id, :tenant, :owner, :atype, :aid, :seq, :type, CAST(:payload AS jsonb),
-                            'RECEIVED', now())
+                                             aggregate_seq, type, conversation_id, payload, status, received_at)
+                    VALUES (:id, :event_id, :tenant, :owner, :atype, :aid, :seq, :type, :conv,
+                            CAST(:payload AS jsonb), 'RECEIVED', now())
                     ON CONFLICT (event_id) DO NOTHING
                     RETURNING id
                     """
@@ -71,6 +72,7 @@ async def receive_event(db: Database, event: Any) -> str:
                     "aid": event.aggregate_id,
                     "seq": event.aggregate_seq,
                     "type": event.type,
+                    "conv": conversation_id,
                     "payload": _j(payload),
                 },
             )
@@ -161,8 +163,11 @@ async def _apply_one(db: Database, inbox_id: str) -> bool:
 
 
 async def _mark(s: AsyncSession, inbox_id: str, status: str, error: str | None) -> None:
+    # Applied bodies are no longer needed (receipt + seq stay for dedupe). A FAILED body is kept so the
+    # event can be inspected and re-queued; reset/delete still scrubs it with the rest of the conversation.
+    scrub = ", payload = '{}'::jsonb" if status == "APPLIED" else ""
     await s.execute(
-        text("UPDATE event_inbox SET status = :st, error = :err, applied_at = now(), payload = '{}'::jsonb WHERE id = :id"),
+        text(f"UPDATE event_inbox SET status = :st, error = :err, applied_at = now(){scrub} WHERE id = :id"),
         {"st": status, "err": error, "id": inbox_id},
     )
 
@@ -249,9 +254,11 @@ async def _purge_epoch(s: AsyncSession, tenant: str, conversation_id: str, epoch
     if epoch is not None:
         params["e"] = epoch
     await _lock_inbox_scope(s, tenant, conversation_id)
+    # Indexed by (tenant_id, conversation_id); bodies already scrubbed are skipped.
     inbox_epoch = "AND payload->>'epoch' = CAST(:e AS text)" if epoch is not None else ""
     await s.execute(text(
-        "UPDATE event_inbox SET payload = '{}'::jsonb WHERE tenant_id=:t AND payload->>'conversationId'=:c "
+        "UPDATE event_inbox SET payload = '{}'::jsonb WHERE tenant_id=:t AND conversation_id=:c "
+        "AND payload <> '{}'::jsonb "
         f"AND type IN ('ConversationOpened','CharacterRevisionChanged','AnswerCommitted') {inbox_epoch}"
     ), {**params, "e": str(epoch)} if epoch is not None else params)
     for table in tables:

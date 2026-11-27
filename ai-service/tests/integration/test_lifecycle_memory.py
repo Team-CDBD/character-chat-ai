@@ -271,3 +271,69 @@ async def test_revision_filters_character_memory_even_when_extraction_lags(clien
     assert (await client.get(f"{API}/generations/{job}")).json()["status"] == "COMPLETED"
     memories = mock.chat_calls[-1][1].content
     assert "반려동물: 고양이" in memories and "직업: 대학생" not in memories
+
+
+async def test_failed_event_keeps_body_until_conversation_is_deleted(client, services, monkeypatch):
+    from app.lifecycle import handler
+
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await drain(services)
+
+    async def broken(*args):
+        raise RuntimeError("transient")
+
+    monkeypatch.setitem(handler.APPLIERS, "AnswerCommitted", broken)
+    await post(client, conv.committed(1, "원문", "답변", DAY1))
+    await drain(services)
+    assert await rows(services, "SELECT status, payload->>'conversationId' FROM event_inbox "
+                                "WHERE type='AnswerCommitted'") == [("FAILED", conv.conversation_id)]
+    monkeypatch.undo()
+    await post(client, conv.character_deleted())
+    await drain(services)
+    assert await rows(services, "SELECT count(*) FROM event_inbox WHERE payload <> '{}'::jsonb") == [(0,)]
+
+
+async def test_embedding_outage_completes_job_and_reindexes_later(client, services, mock):
+    from app.providers.base import ProviderError
+
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await drain(services)
+    mock.json_scripts["extract-v1"] = scripted_extractor
+    real_embed = mock.embed
+
+    async def down(texts, model):
+        raise ProviderError("embedding down")
+
+    mock.embed = down
+    await post(client, conv.committed(1, "나 다음 주 금요일에 면접 있어", "응", DAY1))
+    await drain(services)
+    assert await rows(services, "SELECT run_count, status FROM ai_job WHERE kind='MEMORY'") == [(1, "COMPLETED")]
+    assert await rows(services, "SELECT index_status FROM memory") == [("FAILED",)]
+
+    mock.embed = real_embed
+    await post(client, conv.committed(2, "응", "응", DAY1))
+    await drain(services)
+    assert await rows(services, "SELECT index_status FROM memory") == [("INDEXED",)]
+
+
+async def test_character_promise_survives_character_edit(client, services, mock):
+    mock.json_scripts["extract-v1"] = lambda _: {"memories": [
+        {"type": "UNFINISHED", "subject": "character", "predicate": "promise", "value": "노래 들려주기",
+         "timeExpression": "다음 주 금요일", "resolvedAt": "2026-11-13", "timeUncertainty": "DAY",
+         "importance": 0.9, "sourceMessageIds": ["a1"], "evidence": "다음 주 금요일에 노래 들려줄게",
+         "opensUnfinishedEvent": True},
+    ]}
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await post(client, conv.committed(1, "다음 주 금요일에 노래 불러줘", "다음 주 금요일에 노래 들려줄게", DAY1))
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert len(await rows(services, "SELECT 1 FROM unfinished_event WHERE status='OPEN'")) == 1
+    day7 = datetime(2026, 11, 12, 23, 10, tzinfo=UTC)  # due day in KST
+    job = (await client.post(f"{API}/generations", json=conv.generation(2, "좋은 아침", day7))).json()["aiJobId"]
+    await drain(services)
+    assert (await client.get(f"{API}/generations/{job}")).json()["status"] == "COMPLETED"
+    system_variable = mock.chat_calls[-1][1].content
+    assert "<open_events>" in system_variable and "노래 들려주기" in system_variable.split("<open_events>")[1]
