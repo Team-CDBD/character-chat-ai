@@ -57,7 +57,7 @@ flowchart LR
         DB[("AI DB<br/>PostgreSQL 16 + pgvector")]
     end
 
-    MP["모델 제공자<br/>(OpenAI 또는 Mock)"]
+    MP["모델 제공자<br/>(Ollama · OpenAI · Mock)"]
 
     BEAPI -- "POST /generations" --> API
     BEAPI -- "POST /lifecycle-events" --> API
@@ -74,7 +74,7 @@ flowchart LR
 - **ai-api**는 요청을 DB에 저장하고 `202`로 답할 뿐, 요청 연결 안에서 모델을 부르지 않습니다(접수와 실행 분리).
 - **ai-worker**는 같은 코드베이스의 실행 루프 세 종류를 한 프로세스에서 돌립니다. 생성 슬롯과 기억 슬롯을 나눠 두어, 추출 작업이 몰려도 사용자가 기다리는 생성 슬롯을 빼앗지 않습니다.
 - 작업 큐는 **DB의 `ai_job` 테이블**입니다. Redis나 메시지 브로커 없이 `FOR UPDATE SKIP LOCKED` + lease + fencing token으로 재시작 복구를 보장합니다.
-- 모든 모델 호출은 **Provider Adapter**를 거칩니다. 로컬 기본값은 `MockProvider`이며, OpenAI 설정으로 실제 채팅·기억 추출·임베딩을 실행할 수 있습니다. 설정 예시는 [AI 서비스 실행 문서](ai-service/README.md#openai로-실행)에 있습니다.
+- 모든 모델 호출은 **Provider Adapter**를 거칩니다. 기본 공급자는 Ollama이며 채팅과 기억 추출은 `gemma4:12b`, 임베딩은 `embeddinggemma`를 사용합니다. 설정 예시는 [AI 서비스 실행 문서](ai-service/README.md#공급자-전환)에 있습니다.
 
 두 개의 경로가 핵심입니다.
 

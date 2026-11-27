@@ -3,10 +3,13 @@ from __future__ import annotations
 from app.config import Settings
 from app.providers.base import ModelProvider, ProviderAdapter
 from app.providers.mock import MockProvider
+from app.providers.ollama import OllamaProvider
 from app.providers.openai import OpenAIProvider
 
 
 def build_provider(settings: Settings) -> ModelProvider:
+    if settings.provider == "ollama":
+        return OllamaProvider(settings.ollama_base_url, settings.provider_timeout_seconds)
     if settings.provider == "mock":
         return MockProvider(chunk_delay=0.02)
     if settings.provider == "openai":
