@@ -331,7 +331,11 @@ class DialogueManager:
         degraded.extend(built.degraded)
 
         snapshot_id = new_id()
-        content = built.content() | {"character": character}
+        content = built.content() | {
+            "character": character,
+            "tokenCounter": self.sv.provider.token_count_source,
+            "tuningVersion": self.cfg.tuning.version(),
+        }
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             await s.execute(

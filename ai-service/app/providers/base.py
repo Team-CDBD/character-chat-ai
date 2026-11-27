@@ -8,10 +8,11 @@ concurrency slot. A concrete provider only implements :class:`ModelProvider`.
 from __future__ import annotations
 
 import asyncio
-import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
+
+from app.providers.tokens import TokenCounter, estimate_tokens
 
 Role = Literal["system", "user", "assistant"]
 
@@ -48,11 +49,9 @@ class ProviderTimeout(ProviderError):
     pass
 
 
-def estimate_tokens(text: str) -> int:
-    """Conservative estimate until the chosen model's official tokenizer is wired in (plan §12)."""
-    if not text:
-        return 0
-    return math.ceil(len(text) / 1.5)
+# ``estimate_tokens`` (re-exported) is the fixed conservative estimate; the adapter prefers an exact or
+# calibrated counter (providers/tokens.py).
+__all__ = ["estimate_tokens"]
 
 
 class ModelProvider(Protocol):
@@ -78,13 +77,31 @@ class StreamOutcome:
 
 
 class ProviderAdapter:
-    def __init__(self, provider: ModelProvider, *, timeout_seconds: float, max_concurrency: int) -> None:
+    def __init__(
+        self,
+        provider: ModelProvider,
+        *,
+        timeout_seconds: float,
+        max_concurrency: int,
+        counter: TokenCounter | None = None,
+        count_model: str | None = None,
+    ) -> None:
         self.provider = provider
         self.timeout = timeout_seconds
         self._slots = asyncio.Semaphore(max_concurrency)
+        self.counter = counter or TokenCounter(calibrate=False, fallback=provider.count_tokens)
+        self.count_model = count_model  # calibration only learns from calls to this (the chat) model
 
     def count_tokens(self, text: str) -> int:
-        return self.provider.count_tokens(text)
+        return self.counter.count(text)
+
+    @property
+    def token_count_source(self) -> str:
+        return self.counter.source
+
+    def _observe(self, messages: list[PromptMessage], params: ChatParams, usage: Usage | None) -> None:
+        if usage is not None and usage.input_tokens and (self.count_model is None or params.model == self.count_model):
+            self.counter.observe([m.content for m in messages], usage.input_tokens)
 
     async def stream_chat(
         self, messages: list[PromptMessage], params: ChatParams
@@ -111,6 +128,7 @@ class ProviderAdapter:
                 parts.append(delta)
                 yield delta
             text = "".join(parts)
+            self._observe(messages, params, reported_usage)
             usage = reported_usage or Usage(
                 model=params.model,
                 input_tokens=sum(self.count_tokens(m.content) for m in messages),
@@ -123,7 +141,7 @@ class ProviderAdapter:
     ) -> tuple[dict[str, Any], Usage]:
         async with self._slots:
             try:
-                return await asyncio.wait_for(
+                result, usage = await asyncio.wait_for(
                     self.provider.complete_json(messages, params, schema_name), timeout=self.timeout
                 )
             except TimeoutError as exc:
@@ -132,6 +150,8 @@ class ProviderAdapter:
                 raise
             except Exception as exc:
                 raise ProviderError(str(exc)) from exc
+        self._observe(messages, params, usage)
+        return result, usage
 
     async def embed(self, texts: list[str], model: str) -> tuple[list[list[float]], Usage]:
         async with self._slots:
