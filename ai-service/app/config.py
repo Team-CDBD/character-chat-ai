@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # Provider selection. "mock" until the model is chosen (plan §12, W2).
     provider: str = "mock"
+    openai_api_key: SecretStr | None = None
     provider_timeout_seconds: float = 30.0
     provider_max_concurrency: int = 8
     chat_model: str = "mock-chat"

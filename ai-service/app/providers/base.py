@@ -58,7 +58,7 @@ def estimate_tokens(text: str) -> int:
 class ModelProvider(Protocol):
     name: str
 
-    def stream_chat(self, messages: list[PromptMessage], params: ChatParams) -> AsyncIterator[str]:
+    def stream_chat(self, messages: list[PromptMessage], params: ChatParams) -> AsyncIterator[str | Usage]:
         """Yield text deltas. Must raise ProviderError / ProviderTimeout on failure."""
         ...
 
@@ -92,6 +92,7 @@ class ProviderAdapter:
         """Yield deltas, then a final :class:`StreamOutcome` with normalized usage."""
         async with self._slots:
             parts: list[str] = []
+            reported_usage = None
             iterator = self.provider.stream_chat(messages, params).__aiter__()
             while True:
                 try:
@@ -104,10 +105,13 @@ class ProviderAdapter:
                     raise
                 except Exception as exc:  # normalize unknown SDK errors
                     raise ProviderError(str(exc)) from exc
+                if isinstance(delta, Usage):
+                    reported_usage = delta
+                    continue
                 parts.append(delta)
                 yield delta
             text = "".join(parts)
-            usage = Usage(
+            usage = reported_usage or Usage(
                 model=params.model,
                 input_tokens=sum(self.count_tokens(m.content) for m in messages),
                 output_tokens=self.count_tokens(text),
