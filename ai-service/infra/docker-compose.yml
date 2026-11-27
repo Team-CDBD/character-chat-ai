@@ -12,6 +12,11 @@ x-ai-env: &ai-env
   AI_EMBEDDING_MODEL:
   AI_OLLAMA_BASE_URL: ${AI_OLLAMA_BASE_URL:-http://ollama:11434}
   AI_OPENAI_API_KEY: ${AI_OPENAI_API_KEY:-}
+  # Optional: exact token counts for Gemma (mount the file, e.g. ./tokenizer:/srv/tokenizer:ro)
+  AI_TOKENIZER_FILE:
+  # Optional: tuning overrides as a JSON file (see docs/tuning.md)
+  AI_TUNING_FILE:
+  AI_REINDEX_INTERVAL_SECONDS:
 
 services:
   ollama:

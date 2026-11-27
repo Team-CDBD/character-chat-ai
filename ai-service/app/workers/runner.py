@@ -14,6 +14,7 @@ import socket
 from app.dialogue.manager import DialogueManager
 from app.lifecycle.handler import process_pending
 from app.memory.pipeline import MemoryPipeline
+from app.memory.reindex import reindex_all, stale_counts
 from app.persistence import jobs
 from app.services import Services
 
@@ -47,6 +48,23 @@ class WorkerRunner:
                 n = 0
             if n == 0:
                 await self._sleep()
+
+    async def reindex_loop(self) -> None:
+        """Background re-embedding of stale memories (embedding model change, outages)."""
+        interval = self.cfg.reindex_interval_seconds
+        while not self._stop.is_set():
+            try:
+                pending = (await stale_counts(self.sv.db, self.cfg.embedding_model)).remaining
+                if pending:
+                    result = await reindex_all(self.sv.db, self.sv.provider, self.cfg.embedding_model,
+                                               self.cfg.reindex_sweep_batch, max_batches=10)
+                    log.info("embedding re-index: %d embedded, %d remaining", result.embedded, result.remaining)
+            except Exception:
+                log.exception("re-index sweep error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
 
     async def generation_slot(self, slot: int) -> None:
         owner = f"{self.worker_id}:gen{slot}"
@@ -82,6 +100,8 @@ class WorkerRunner:
         tasks = [asyncio.create_task(self.lifecycle_loop())]
         tasks += [asyncio.create_task(self.generation_slot(i)) for i in range(self.cfg.generation_slots)]
         tasks += [asyncio.create_task(self.memory_slot(i)) for i in range(self.cfg.memory_slots)]
+        if self.cfg.reindex_interval_seconds > 0 and self.cfg.reindex_sweep_batch > 0:
+            tasks.append(asyncio.create_task(self.reindex_loop()))
         try:
             await self._stop.wait()
         finally:

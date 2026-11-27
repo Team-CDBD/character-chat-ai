@@ -410,3 +410,62 @@ async def test_failed_revision_check_keeps_character_facts_hidden(client, servic
     memories = await _memories_in_prompt(client, services, mock, conv, 2)
     assert "함께한 일: 한강 산책" in memories  # shared stays visible
     assert "라면" not in memories and "대학생" not in memories  # unchecked character facts: fail closed
+
+
+async def test_embedding_model_change_reindexes_old_vectors(client, services, mock):
+    from app.memory.reindex import reindex_all, stale_counts
+
+    mock.json_scripts["extract-v1"] = scripted_extractor
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await post(client, conv.committed(1, "나 다음 주 금요일에 면접 있어", "응", DAY1))
+    await post(client, conv.committed(2, "나 민트초코 싫어해", "응", DAY1))
+    await drain(services)
+    assert await rows(services, "SELECT DISTINCT embedding_version FROM memory") == [("mock-embed",)]
+
+    services.settings.embedding_model = "mock-embed-v2"
+    status = await stale_counts(services.db, "mock-embed-v2")
+    assert status.remaining == 2 and status.by_version == {"mock-embed / INDEXED": 2}
+    job = (await client.post(f"{API}/generations", json=conv.generation(3, "면접 얘기", DAY1))).json()["aiJobId"]
+    await drain(services)
+    assert "KEYWORD_FALLBACK" in (await client.get(f"{API}/generations/{job}")).json()["degraded"]
+
+    # A memory job of the conversation re-embeds a few stale rows on its own ...
+    services.settings.tuning = services.settings.tuning.model_copy(
+        update={"memory": services.settings.tuning.memory.model_copy(update={"reindex_batch": 1})})
+    await post(client, conv.committed(3, "응", "응", DAY1))
+    await drain(services)
+    assert (await stale_counts(services.db, "mock-embed-v2")).remaining == 1
+    # ... and the sweep / CLI finishes the rest.
+    result = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
+    assert (result.embedded, result.remaining) == (1, 0)
+    assert await rows(services, "SELECT DISTINCT embedding_version, index_status FROM memory") == [
+        ("mock-embed-v2", "INDEXED")]
+    assert await rows(services, "SELECT count(*) FROM usage_ledger WHERE attempt_id='reindex'") == [(1,)]
+    job = (await client.post(f"{API}/generations", json=conv.generation(4, "면접 얘기", DAY1))).json()["aiJobId"]
+    await drain(services)
+    assert "KEYWORD_FALLBACK" not in (await client.get(f"{API}/generations/{job}")).json()["degraded"]
+
+
+async def test_reindex_skips_revoked_conversations_and_survives_outage(client, services, mock):
+    from app.memory.reindex import reindex_all, stale_counts
+    from app.providers.base import ProviderError
+
+    mock.json_scripts["extract-v1"] = scripted_extractor
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await post(client, conv.committed(1, "나 다음 주 금요일에 면접 있어", "응", DAY1))
+    await drain(services)
+    real_embed = mock.embed
+
+    async def down(texts, model):
+        raise ProviderError("down")
+
+    mock.embed = down
+    result = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
+    assert (result.embedded, result.failed, result.remaining) == (0, 1, 1)
+    assert await rows(services, "SELECT index_status, embedding_version FROM memory") == [("INDEXED", "mock-embed")]
+    mock.embed = real_embed
+    await post(client, conv.reset())
+    await drain(services)
+    assert (await stale_counts(services.db, "mock-embed-v2")).remaining == 0

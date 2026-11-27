@@ -23,6 +23,7 @@ from app.knowledge.context_builder import CHARACTER_FIELDS, render_character
 from app.lifecycle.handler import enqueue_job
 from app.memory import prefilter
 from app.memory.reducer import ExistingMemory, reduce
+from app.memory.reindex import EMBED_TEXT, STALE
 from app.memory.validator import EXTRACTOR_VERSION, MemoryType, TurnText, parse_extraction, validate
 from app.persistence.jobs import ClaimedJob, FencedJob, LeaseLost
 from app.persistence.models import new_id
@@ -516,16 +517,18 @@ class MemoryPipeline:
             await self._advance_watermark(s, job, embedding=True)
 
     async def _reindex_backlog(self, fenced: FencedJob, skip: set[str]) -> list[tuple[str, str]]:
-        """Earlier memories of this conversation whose embedding failed or never ran."""
+        """Earlier memories of this conversation whose embedding failed, never ran, or was made by a
+        different embedding model than the configured one (model change, see memory/reindex.py)."""
         job = fenced.job
         async with self.sv.db.session() as s:
             rows = (await s.execute(text(
-                "SELECT id, concat_ws(' ', predicate, value, evidence) FROM memory "
-                "WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c AND epoch=:e "
-                "AND valid_to IS NULL AND index_status <> 'INDEXED' AND source_turn_seq < :ts "
-                "ORDER BY created_at LIMIT :n"
+                f"SELECT m.id, {EMBED_TEXT} FROM memory m "
+                "WHERE m.tenant_id=:t AND m.owner_id=:o AND m.conversation_id=:c AND m.epoch=:e "
+                f"AND m.valid_to IS NULL AND {STALE} AND m.source_turn_seq < :ts "
+                "ORDER BY m.created_at LIMIT :n"
             ), {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch,
-                "ts": job.turn_seq, "n": self.cfg.tuning.memory.reindex_batch})).all()
+                "ev": self.cfg.embedding_model, "ts": job.turn_seq,
+                "n": self.cfg.tuning.memory.reindex_batch})).all()
         return [(mid, body) for mid, body in rows if mid not in skip]
 
     async def _maybe_summarize(self, fenced: FencedJob) -> None:
