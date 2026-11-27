@@ -190,6 +190,8 @@ flowchart LR
 - 폐기된 Regenerate 후보와 실패한 답변은 `AnswerCommitted`에 애초에 없으므로 추출 입력이 될 수 없습니다.
 - 같은 `(type, subject, predicate)`의 새 값은 기존 기억을 **supersedes**하고(`valid_to` 설정), 검색은 유효한 기억만 봅니다. 같은 값이면 중복으로 건너뜁니다.
 - 모델 출력 일부가 깨져도 유효한 항목만 살려 씁니다.
+- `subject`는 `user`·`character`·`shared` 셋으로 정규화합니다(`assistant`→`character`, `both`→`shared` 등). 모르는 값은 근거가 사용자 발화뿐이면 `user`, 아니면 `character`로 봅니다.
+- `likes`/`dislikes`는 근거 인용에서 대상 바로 뒤의 감정 표현이 반대면 거절합니다("민트초코 진짜 싫어해" → `likes` 거절, "안 좋아해"는 `dislikes`로 인정).
 
 **검색 점수와 관련성 게이트** (`knowledge/retriever.py`):
 
@@ -200,8 +202,10 @@ flowchart LR
 - 시간 근접도: 일정형은 해석 일시가 ±2일이면 1.0, 그 외는 생성 후 경과일로 감쇠합니다.
 - **게이트 0.25 미만은 Context에 넣지 않습니다.** "많이 기억하는 척"보다 "필요할 때 정확히"가 목표입니다.
 - 임베딩이 없거나 실패한 기억은 빠뜨리지 않고 키워드 점수로 대신하며 `KEYWORD_FALLBACK`을 기록합니다.
+- **캐릭터 수정 후**: `subject=character`인 기억은 출처 Turn의 `character_rev`가 요청의 revision과 같을 때만 검색합니다. 사용자·공동 기억과 미완료 사건(약속·일정)은 수정과 상관없이 유지됩니다.
 
 **실패 처리**: 추출 호출이 실패하면 최대 3회 다시 시도하고, 그래도 안 되면 그 Turn은 추출을 포기하되 watermark는 올려 뒤 Turn이 막히지 않게 합니다(원본 Turn은 남아 있어 재처리 가능).
+추출 결과 저장 뒤 워커가 죽으면 다음 워커는 추출을 다시 하지 않고 임베딩·요약부터 이어 갑니다. 임베딩 실패는 Job 실패가 아닙니다. 기억은 `index_status=FAILED`로 남고, 같은 대화의 다음 기억 Job이 최대 16개씩 다시 색인합니다.
 
 ## 7. 관계와 미완료 사건
 
@@ -282,11 +286,11 @@ stateDiagram-v2
 
 | 엔드포인트 | 결과 | 의미 |
 |---|---|---|
-| `POST /internal/ai/v1/generations` | `202 {aiJobId, status}` | 저장 후 응답. 같은 `attemptId`+같은 본문 → 같은 Job, 본문이 다르면 `409 IDEMPOTENCY_CONFLICT`. 미등록 대화는 `404`, 차단된 epoch는 `409 EPOCH_REVOKED` |
+| `POST /internal/ai/v1/generations` | `202 {aiJobId, status}` | 저장 후 응답. `mode=NEW`에 `contextSnapshotId`를 넣으면 `422`. 같은 `attemptId`+같은 본문 → 같은 Job, 본문이 다르면 `409 IDEMPOTENCY_CONFLICT`. 미등록 대화는 `404`, 차단된 epoch는 `409 EPOCH_REVOKED` |
 | `GET /generations/{aiJobId}` | 상태, text, usage, error, snapshotId, degraded | 저장된 결과만 반환 |
 | `GET /generations/{aiJobId}/events` | SSE `accepted · delta · completed · failed` | `eventSeq` 단조 증가, `Last-Event-ID`(또는 `?after=`) 이후 재전송 |
 | `POST /lifecycle-events` | `202 {receiptId}` | Inbox 저장만 의미 (202 ≠ 반영 완료) |
-| `GET /lifecycle-events/{receiptId}` | `RECEIVED · APPLIED · FAILED` | BE가 반영·삭제 완료를 추적 |
+| `GET /lifecycle-events/{receiptId}` | `RECEIVED · APPLIED · FAILED` | BE가 반영·삭제 완료를 추적. 반영된 이벤트는 영수증·순번만 남기고 본문을 지웁니다. FAILED 본문은 원인 확인·재처리를 위해 남기며, 초기화·삭제 때 함께 지웁니다 |
 | `GET /conversations/{id}/state?tenantId=&epoch=` | watermark들 | 진단용. 기억 본문은 노출하지 않음 |
 
 Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevisionChanged`, `ConversationReset`, `CharacterDeleted`.
@@ -343,7 +347,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 - **아주 긴 메시지**: 최소 3턴에서도 예산을 넘으면 실패 대신 최근 창을 1턴까지 줄입니다(`RECENT_BELOW_MINIMUM`).
 - **Output Policy**: 역할 이탈과 말투 위반은 측정만 하고 차단하지 않습니다(플랜의 "MVP에서는 측정만"을 따름).
 - **Pre-filter**: 짧은 맞장구·웃음은 건너뛰고, 일정·취향·감정 같은 신호 단어가 있거나 12자 이상이면 추출합니다.
-- **임베딩**: 플랜은 별도 Job이지만 지금은 기억 Job 안에서 저장 직후 실행합니다. 실패해도 기억은 남고 `index_status=FAILED`로 표시합니다.
+- **임베딩**: 플랜은 별도 Job이지만 지금은 기억 Job 안에서 저장 직후 실행합니다. 실패해도 기억은 남고 `index_status=FAILED`로 표시하며, 다음 기억 Job이 다시 색인합니다.
 - **관계 초기값**: 대화 시작 시 50/40/0으로 두고 `BASELINE` Job이 모델 추정치로 한 번만 덮어씁니다.
 - **모델 장애 재시도**: 스트림 시작 전 1회 추가 시도. 기억 추출은 최대 3회.
 
@@ -358,7 +362,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 - 구체 모델과 공급자 (한국어 평가셋으로 선정), 공식 토크나이저
 - 관계 사건 변화량·단계 경계값, 검색 가중치·게이트 임계값, 최근 창 W와 요약 주기
 - ANN 인덱스·별도 Vector DB 도입, Retriever·NLU 독립 서비스화
-- 설정과 충돌하는 기억 표시(`conflicts_with_revision`): 컬럼과 검색 제외는 있지만 표시하는 로직은 아직 없음
+- 설정과 충돌하는 기억 표시(`conflicts_with_revision`): 지금은 캐릭터 수정 시 이전 revision의 캐릭터 기억을 모두 검색에서 뺍니다(보수적). 바뀐 필드와 실제로 충돌하는 기억만 표시하는 로직은 아직 없음
 
 ## 13. 진행 상황
 

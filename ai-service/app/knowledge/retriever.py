@@ -22,10 +22,11 @@ from app.understanding.normalize import keywords
 W_SEMANTIC, W_KEYWORD, W_IMPORTANCE, W_TIME = 0.55, 0.15, 0.15, 0.15
 
 
-# Persona edits may share a character revision. Only the source character revision
-# governs facts attributed to the character; user and shared memories stay available.
+# Facts attributed to the character are only trusted under the character revision they were said in;
+# user and shared memories stay available. The validator normalizes ``subject`` to user/character/shared,
+# and anything else is treated as character-sourced (fail closed).
 CHARACTER_REVISION_FILTER = """
-    (m.subject <> 'character' OR EXISTS (
+    (m.subject IN ('user', 'shared') OR EXISTS (
         SELECT 1 FROM committed_turn source
         WHERE source.tenant_id=m.tenant_id AND source.conversation_id=m.conversation_id
           AND source.epoch=m.epoch AND source.turn_seq=m.source_turn_seq AND source.character_rev=:cr

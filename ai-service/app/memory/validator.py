@@ -122,15 +122,46 @@ def _evidence_sources(turn: TurnText, ids: list[str], evidence: str) -> set[str]
     return found or None
 
 
+_SUBJECTS = {
+    "user": "user", "사용자": "user", "유저": "user", "me": "user",
+    "character": "character", "assistant": "character", "캐릭터": "character", "bot": "character",
+    "shared": "shared", "both": "shared", "we": "shared", "us": "shared", "우리": "shared", "둘": "shared",
+}
+
+
+def _normalize_subject(subject: str, speakers: set[str]) -> str:
+    """Map the model's free-form subject onto user / character / shared.
+
+    Retrieval hides character facts from older character revisions, so an unknown subject must not
+    slip past that filter: it is the user's only when the evidence is the user's own words.
+    """
+    known = _SUBJECTS.get(subject.strip().lower())
+    if known:
+        return known
+    return "user" if speakers == {"user"} else "character"
+
+
+# Sentiment cues searched right after the preference target, earliest match wins.
+# Negated liking ("안 좋아", "좋아하지 않") must be tried before plain "좋아".
+_SENTIMENT = re.compile(r"(?P<neg>안좋아|좋아하지않|좋아하진않|좋진않)|(?P<dis>싫어|싫다|싫은|싫음|별로)|(?P<like>좋아|좋다|좋음)")
+_SENTIMENT_WINDOW = 10  # normalized characters after the target ("진짜 싫어해요" fits)
+
+
 def _preference_supported(m: ExtractedMemory) -> bool:
     if m.type != MemoryType.USER_FACT or m.predicate not in {"likes", "dislikes"}:
         return True
-    # Reject a direct contradiction about this target. Leave other languages and
-    # paraphrases to the normal source checks.
-    opposite = "싫어" if m.predicate == "likes" else "좋아"
-    target = re.escape(normalize(m.value))
-    contradiction = target + r"(?:을|를|은|는|도)?" + opposite + r"(?:해|해요|합니다|함|한다)$"
-    return not re.search(contradiction, normalize(m.evidence))
+    # Reject a likes/dislikes whose own quote says the opposite about this target. Other languages and
+    # paraphrases are left to the normal source checks and the evaluation set.
+    target, ev = normalize(m.value), normalize(m.evidence)
+    if not target:
+        return True
+    for found in re.finditer(re.escape(target), ev):
+        cue = _SENTIMENT.search(ev, found.end(), found.end() + _SENTIMENT_WINDOW)
+        if cue is None:
+            continue
+        said = "likes" if cue.lastgroup == "like" else "dislikes"
+        return said == m.predicate
+    return True
 
 
 def validate(output: ExtractionOutput, turn: TurnText, open_event_ids: set[str]) -> ValidationReport:
@@ -144,6 +175,7 @@ def validate(output: ExtractionOutput, turn: TurnText, open_event_ids: set[str])
         if speakers is None:
             rejected.append(("memory", "evidence_not_found"))
             continue
+        m = m.model_copy(update={"subject": _normalize_subject(m.subject, speakers)})
         # Facts about the user come only from the user's own words.
         if m.subject == "user" and "user" not in speakers:
             rejected.append(("memory", "user_fact_from_character"))

@@ -80,6 +80,7 @@ class EventInbox(Base):
     __tablename__ = "event_inbox"
     __table_args__ = (
         Index("ix_inbox_pending", "status", "tenant_id", "aggregate_type", "aggregate_id", "aggregate_seq"),
+        Index("ix_inbox_conversation", "tenant_id", "conversation_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)  # receiptId
@@ -90,6 +91,7 @@ class EventInbox(Base):
     aggregate_id: Mapped[str] = mapped_column(String(64))
     aggregate_seq: Mapped[int] = mapped_column(BigInteger)
     type: Mapped[str] = mapped_column(String(48))
+    conversation_id: Mapped[str | None] = mapped_column(String(64))  # scrub lookup on reset/delete
     payload: Mapped[dict[str, Any]]
     status: Mapped[str] = mapped_column(String(16), default="RECEIVED")
     error: Mapped[str | None] = mapped_column(Text)
