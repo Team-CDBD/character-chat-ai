@@ -3,6 +3,8 @@
 캐릭터 챗 MVP의 **AI 서비스** 저장소입니다. 이 문서는 전체 아키텍처를 설명하고, 처음 쓴 「AI 아키텍처와 AI 서버 개발 플랜 v1.0」(이하 *플랜*) 가운데 **실제 코드에 반영되어 확정된 내용**을 정리합니다. 플랜에서 바뀐 점과 아직 열어 둔 것도 따로 적었습니다.
 
 > 실행 방법·디렉터리별 설명은 [`ai-service/README.md`](ai-service/README.md), BE와 주고받는 계약은 [`ai-service/contracts/README.md`](ai-service/contracts/README.md)를 보세요.
+>
+> **구조·플로우 문서 (HTML)**: [`docs/architecture-flow.html`](docs/architecture-flow.html)은 서버별 구성, Mermaid 다이어그램 12종(시퀀스·플로우·상태·ER, 카드 수정 후 충돌 점검 포함), 버튼으로 단계를 따라가는 인터랙티브 플로우, Mock 현황과 BE 연동 가이드를 한 파일에 담았습니다. 레포를 받은 뒤 브라우저로 열면 됩니다(다이어그램은 jsDelivr의 mermaid를 불러옵니다). 요약은 [14장](#14-구조플로우-문서와-be-연동-현황)에 있습니다.
 
 ## 목차
 1. [이 서비스가 책임지는 것](#1-이-서비스가-책임지는-것)
@@ -18,6 +20,7 @@
 11. [기술 스택과 배포](#11-기술-스택과-배포)
 12. [플랜 대비 확정·변경·미결 사항](#12-플랜-대비-확정변경미결-사항)
 13. [진행 상황](#13-진행-상황)
+14. [구조·플로우 문서와 BE 연동 현황](#14-구조플로우-문서와-be-연동-현황)
 
 ---
 
@@ -50,8 +53,8 @@ flowchart LR
         API["ai-api<br/>/internal/ai/v1<br/>인증 · 스키마 검증 · 멱등 접수 · SSE"]
         subgraph W["ai-worker (한 프로세스)"]
             LC["Lifecycle 루프<br/>Inbox → 순서 보장 → Projection"]
-            GEN["생성 슬롯 ×8<br/>Dialogue Manager"]
-            MEM["기억 슬롯 ×4<br/>Memory Pipeline · Baseline"]
+            GEN["생성 슬롯<br/>Dialogue Manager"]
+            MEM["기억 슬롯<br/>Memory Pipeline · Baseline"]
         end
         PA["Provider Adapter<br/>timeout · 동시성 · usage"]
         DB[("AI DB<br/>PostgreSQL 16 + pgvector")]
@@ -141,7 +144,7 @@ sequenceDiagram
 | `lifecycle/` | Inbox 중복 제거, `aggregateSeq` 순서 보장, Projection, 초기화·삭제 | gap을 건너뛰지 않음. 차단된 epoch로의 쓰기 거부 |
 | `memory/` | Pre-filter, 추출 결과 검증, supersedes·중복 처리, 임베딩, Rolling Summary | 근거 없는 사용자 사실 저장 금지. 모델 출력으로 SQL·권한·설정을 바꾸지 않음 |
 | `relationship/` | 결정적 관계 Reducer, 단계(히스테리시스), 미완료 사건 수명주기 | 메시지 수로 친밀도 증가 금지. 관계가 성격을 덮어쓰지 않음 |
-| `providers/` | 공급자 오류·timeout·usage 표준화, 동시성 슬롯, Mock | 공급자별 차이를 바깥으로 새지 않게 격리 |
+| `providers/` | 공급자 오류·timeout·usage 표준화, 동시성 슬롯, Ollama · OpenAI · Mock | 공급자별 차이를 바깥으로 새지 않게 격리 |
 | `persistence/` | 스키마, Job claim·lease·fencing, Alembic 마이그레이션 | — |
 | `workers/` | lifecycle 루프 · 생성 슬롯 · 기억 슬롯 | — |
 
@@ -163,7 +166,7 @@ sequenceDiagram
 - 입력 합계 상한은 **7,260 토큰**(출력 600은 별도)입니다. 넘으면 **관련도 낮은 기억 → 요약 앞부분 → 최근 창(최소 3턴)** 순서로 줄입니다. 그래도 넘는 아주 긴 메시지는 실패시키지 않고 최근 창을 1턴까지 줄이며 `RECENT_BELOW_MINIMUM`을 기록합니다. 그래도 안 되면 `BUDGET_EXCEEDED`.
 - 프롬프트는 **변하지 않는 계층(1~3)을 첫 system 메시지**, 변하는 계층(4~7)을 두 번째 system 메시지로 둡니다. 공급자의 프롬프트 캐싱으로 입력 비용과 첫 토큰 지연을 줄이기 위해서입니다.
 - 조립한 Context는 **`context_snapshot`에 불변으로 저장**하고 hash를 남깁니다(24시간 보존). Regenerate는 이 스냅샷을 그대로 재사용합니다.
-- 토큰 수는 채팅 모델의 토크나이저 파일(`AI_TOKENIZER_FILE`)이나 tiktoken이 있으면 정확히 세고, 없으면 공급자가 보고한 실제 입력 토큰 수로 보정한 비율을 씁니다(보정 전에는 `글자 수 / 1.5`). 자세한 내용은 [실행 문서](ai-service/README.md#토큰-수-계산).
+- 토큰 수는 채팅 모델의 토크나이저 파일(`AI_TOKENIZER_FILE`)이나 tiktoken이 있으면 정확히 세고, 없으면 공급자가 보고한 실제 입력 토큰 수로 보정한 비율을 씁니다(보정 전과 mock은 `글자 수 / 1.5`). 사용량 기록(`usage_ledger`)은 공급자가 보고한 값을 우선합니다. 자세한 내용은 [실행 문서](ai-service/README.md#토큰-수-계산).
 - 예산 값은 기본값이며 `AI_TUNING__CONTEXT__BUDGETS__RECENT=3200`처럼 바꿀 수 있습니다([튜닝 값](ai-service/docs/tuning.md)).
 
 **Output Policy** (`output_policy.py`): 모델 출력은 문장 끝(또는 80자)까지 버퍼링한 뒤 검사하고 나서 내보냅니다. "저는 AI라서…" 같은 역할 이탈(`ROLE_BREAK`)과 반말 설정에서의 존댓말(`SPEECH_STYLE_HONORIFIC`)은 MVP에서는 **차단하지 않고 표시만** 해서 결과의 `degraded` 목록과 지표로 남깁니다. 빈 답변은 `POLICY_BLOCKED`입니다.
@@ -323,11 +326,20 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | 언어·API | Python 3.12, FastAPI, Pydantic v2 |
 | DB | PostgreSQL 16 + pgvector (메타데이터·출처·벡터를 한 트랜잭션에서), SQLAlchemy 2 async + asyncpg, Alembic |
 | 작업 실행 | DB Job 테이블 + 자체 Worker 루프. Redis·브로커 없음 |
-| 모델 | Provider Adapter 뒤에 Mock. 역할별 티어(생성=상위, 추출·요약=경량, 임베딩=다국어)로 설정 분리 |
+| 모델 | Provider Adapter 뒤에 `AI_PROVIDER=ollama`(기본, Gemma 4 12B + embeddinggemma) · `openai` · `mock`. 역할별 모델을 `AI_CHAT_MODEL`·`AI_EXTRACT_MODEL`·`AI_EMBEDDING_MODEL`로 바꿀 수 있고, 비우면 공급자별 기본값 |
 | 파이프라인 | 명시적 함수 조합. 자율 Agent 프레임워크 없음 |
 | 테스트 | pytest 단위 + 실제 PostgreSQL 통합 테스트, 계약 fixture 검사, GitHub Actions |
 
-**MVP 배포**: `ai-api` 컨테이너 1개 + `ai-worker` 컨테이너 1개(생성 슬롯 8, 기억 슬롯 4) + 관리형 PostgreSQL. GPU 불필요. 로컬은 `ai-service/infra/docker-compose.yml`(api, worker, migrate, pgvector)로 띄웁니다. PROD에서는 같은 코드를 API 풀·생성 Worker 풀·기억 Worker 풀로 나눠 확장합니다.
+**MVP 배포**: `ai-api` 컨테이너 1개 + `ai-worker` 컨테이너 1개 + 관리형 PostgreSQL. 로컬은 `ai-service/infra/docker-compose.yml`(api, worker, migrate, pgvector, `--profile ollama`면 ollama)로 띄웁니다.
+
+공급자에 따라 worker 기본값이 다릅니다(`app/config.py::provider_defaults`).
+
+| 공급자 | 생성 슬롯 | 기억 슬롯 | 모델 동시 호출 | 호출 timeout | lease |
+|---|---|---|---|---|---|
+| `ollama` (기본) | 1 | 1 | 1 | 120초 | 600초 |
+| `openai` · `mock` | 8 | 4 | 8 | 30초 | 30초 |
+
+Ollama는 로컬 추론이라 한 번에 한 호출만 보내고 lease를 길게 잡습니다. 그래서 Ollama 기본 설정에서는 생성과 기억 추출이 각각 한 줄로 처리됩니다. Compose의 Ollama는 CPU로 돌고, GPU 서버의 Ollama는 `AI_OLLAMA_BASE_URL`로 연결합니다. PROD에서는 같은 코드를 API 풀·생성 Worker 풀·기억 Worker 풀로 나눠 확장합니다.
 
 ## 12. 플랜 대비 확정·변경·미결 사항
 
@@ -345,7 +357,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | ⑦ 최근 대화 창으로 기억 지연을 흡수한다 | `wait_context` 2단계 대기 | 통합 테스트 |
 
 ### 구현하면서 정한 것 (플랜에 없거나 바뀐 점)
-- **설정 수치**: 최근 창 6턴(최소 3), 기억 대기 최대 3초, Context 대기 기본 10초, 스냅샷 보존 24시간, 요약 6턴마다, 검색 상위 8개, 게이트 0.25, 미완료 사건 게이트 0.30, lease 30초. 모두 `AI_` 환경변수로 바꿀 수 있습니다(`app/config.py`).
+- **설정 수치**: 최근 창 6턴(최소 3), 기억 대기 최대 3초, Context 대기 기본 10초, 스냅샷 보존 24시간, 요약 6턴마다, 검색 상위 8개, 게이트 0.25, 미완료 사건 게이트 0.30, lease 30초(Ollama 600초). 모두 `AI_` 환경변수로 바꿀 수 있습니다(`app/config.py`).
 - **데이터로 정할 튜닝 값**: 검색 가중치·시간 감쇠, 관계 변화량·단계 경계·일일 상한, 미완료 사건 노출 기간, Context 예산, 턴당 기억 수 등은 현재 값을 기본값으로 `app/tuning.py`에 모았고 파일·환경변수로 바꿉니다. 목록과 결정 근거는 [ai-service/docs/tuning.md](ai-service/docs/tuning.md).
 - **아주 긴 메시지**: 최소 3턴에서도 예산을 넘으면 실패 대신 최근 창을 1턴까지 줄입니다(`RECENT_BELOW_MINIMUM`).
 - **Output Policy**: 역할 이탈과 말투 위반은 측정만 하고 차단하지 않습니다(플랜의 "MVP에서는 측정만"을 따름).
@@ -362,7 +374,7 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 5. 사용자 일 단위 토큰 한도는 BE 원장이 소유합니다. AI는 `usage_ledger`에 용도별 사용량만 남깁니다.
 
 ### 아직 열어 둔 것 (데이터로 결정)
-- 구체 모델과 공급자 (한국어 평가셋으로 선정). Gemma 토크나이저 파일 배포 방식
+- 최종 모델과 공급자 (기본은 Ollama Gemma 4 12B, OpenAI도 연결됨. 한국어 평가셋으로 비교·확정 전), 실기기 추론 속도·메모리 측정, Gemma 토크나이저 파일 배포 방식
 - 관계 사건 변화량·단계 경계값, 검색 가중치·게이트 임계값, 최근 창 W와 요약 주기 — 기본값으로 동작하며 값만 바꾸면 됩니다([tuning.md](ai-service/docs/tuning.md))
 - ANN 인덱스·별도 Vector DB 도입, Retriever·NLU 독립 서비스화
 - 설정 충돌 판정의 정확도: 모델이 판정하므로 평가셋으로 오탐(멀쩡한 기억을 숨김)·미탐 비율을 재야 합니다
@@ -377,9 +389,36 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | P1 기본 생성 경로 | 🟡 | 실제 키로 종단 검증, 모델 2~3종 비교 리포트 |
 | P2 캐릭터 품질 | 🟡 | 일관성 평가 기준선, 설정 충돌 판정 평가 |
 | P3 장시간 대화 | 🟡 | 100턴 시나리오 검증 |
-| P4 Long-term Memory | 🟡 | 실제 추출 모델, precision·recall 리포트, 임베딩 별도 Job |
+| P4 Long-term Memory | 🟡 | 추출 모델 확정(Gemma 4 12B·OpenAI 연결됨), precision·recall 리포트, 임베딩 별도 Job |
 | P5 Relationship·미완료 사건 | 🟡 | 실제 모델 baseline, 변화량 튜닝 |
 | P6 재방문·초기화·삭제 | 🟡 | 삭제 영수증 상세, 운영 지표 대시보드 |
 | P7 통합·부하·베타 | ⬜ | 실제 BE 계약 테스트, 부하·장애 주입 시험 |
 
 테스트는 53개(단위 33, 실제 DB 통합 20)이며 CI에서 매 PR마다 실행됩니다. 기획서 §30 골든 시나리오(Day 1 "다음 주 금요일에 면접 있어" → Day 7 재방문 시 "오늘 면접"이 Context에 들어감)도 그중 하나입니다.
+
+## 14. 구조·플로우 문서와 BE 연동 현황
+
+[`docs/architecture-flow.html`](docs/architecture-flow.html) 구성:
+
+| 장 | 내용 |
+|---|---|
+| 1~2 | 전체 구성도, 서버(제품 BE · ai-api · Lifecycle 루프 · 생성 슬롯 · 기억 슬롯 · AI DB · 모델 Provider)별 역할과 담당 코드 |
+| 3 | Mermaid: 대화 시작·한 턴 시퀀스, 생성·기억·Inbox·후보 이후 분기 플로우, 생성·기억 Job 상태, 초기화·삭제 시퀀스 |
+| 4 | 인터랙티브 플로우: 서버별 레인의 버튼을 누르면 처리 순서, 코드 위치, 입출력 JSON, 데이터 정제 예시(입력 → 결과)가 나오고 이어지는 단계만 켜짐 |
+| 5 | Mock 현황: 무엇이 대역이고 무엇으로 바뀌는지, BE 몫인지 AI 몫인지 |
+| 6 | BE 연동 가이드: 이벤트별 발행 시점·순번, 생성 요청 필드의 BE 쪽 출처, 응답·오류 처리, 연동 순서, 합의 필요 가정 |
+| 7 | 데이터 모델 ER 다이어그램과 초기화·삭제 시 처리 |
+
+**지금 Mock·임시값으로 대신하는 것** (모델은 Mock이 아니라 Ollama가 기본입니다. 아래 표 다음 문단 참고)
+
+| Mock | 위치 | 실제로 바뀔 것 | 담당 |
+|---|---|---|---|
+| 이벤트·생성 요청 빌더 | `tools/mock_be.py::MockConversation` | BE Outbox 발행기 + 생성 요청 클라이언트 | BE |
+| demo CLI (HTTP+SSE 재생) | `python -m tools.mock_be demo` | BE의 SSE 중계, 후보 저장·선택·확정 | BE |
+| 샘플 캐릭터·Persona·tenant | `mock_be.py` 상수 | BE 원본 데이터 | BE |
+| 서비스 토큰 `local-dev-token` | `AI_SERVICE_TOKENS` | 환경별 비밀값 | BE·AI |
+| 사용자 일일 토큰 한도 | 없음 | BE 원장 | BE |
+| 토큰 수 (토크나이저 파일 없을 때) | `providers/tokens.py` 보정 추정 | Gemma `tokenizer.json`을 `AI_TOKENIZER_FILE`로 배포해 정확히 세기 | AI |
+| 튜닝 값 (검색 가중치·관계 변화량·예산 등) | `app/tuning.py` 기본값 | 평가 데이터로 조정 ([tuning.md](ai-service/docs/tuning.md)) | AI |
+
+모델은 더 이상 Mock이 기본이 아닙니다. 기본 Ollama로 demo를 돌리면 Gemma 4 12B가 실제로 답하고 기억을 추출합니다(모델을 먼저 `ollama pull` 해야 함). `AI_PROVIDER=mock`으로 바꾸면 추출 스크립트가 없어 기억이 쌓이지 않고, 통합 테스트는 mock에 스크립트를 넣어 검증합니다. OpenAI를 쓰면 대화 내용이 공급자로 전송되고 요금이 발생합니다. 공급자나 임베딩 모델을 바꾸면 벡터 차원과 `embedding_version`이 달라져 기존 기억은 재색인 전까지 키워드 점수로 검색됩니다.
