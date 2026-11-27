@@ -122,6 +122,17 @@ def _evidence_sources(turn: TurnText, ids: list[str], evidence: str) -> set[str]
     return found or None
 
 
+def _preference_supported(m: ExtractedMemory) -> bool:
+    if m.type != MemoryType.USER_FACT or m.predicate not in {"likes", "dislikes"}:
+        return True
+    # Reject a direct contradiction about this target. Leave other languages and
+    # paraphrases to the normal source checks.
+    opposite = "싫어" if m.predicate == "likes" else "좋아"
+    target = re.escape(normalize(m.value))
+    contradiction = target + r"(?:을|를|은|는|도)?" + opposite + r"(?:해|해요|합니다|함|한다)$"
+    return not re.search(contradiction, normalize(m.evidence))
+
+
 def validate(output: ExtractionOutput, turn: TurnText, open_event_ids: set[str]) -> ValidationReport:
     memories: list[ExtractedMemory] = []
     relations: list[ExtractedRelationEvent] = []
@@ -139,6 +150,9 @@ def validate(output: ExtractionOutput, turn: TurnText, open_event_ids: set[str])
             continue
         if m.type in (MemoryType.USER_FACT, MemoryType.SCHEDULE) and "user" not in speakers:
             rejected.append(("memory", "fact_without_user_evidence"))
+            continue
+        if not _preference_supported(m):
+            rejected.append(("memory", "unsupported_preference"))
             continue
         update: dict[str, Any] = {"importance": min(1.0, max(0.0, m.importance))}
         # A character's suggestion alone never becomes a confirmed plan.

@@ -83,7 +83,15 @@ _CLAIM_ORDERED = text(
         WHERE j.kind = :kind
           AND c.status = 'ACTIVE'
           AND (j.status = 'ACCEPTED' OR (j.status = 'RUNNING' AND j.lease_until < now()))
-          AND (:kind <> 'MEMORY' OR j.turn_seq = c.memory_through_turn_seq + 1)
+          AND (:kind <> 'MEMORY' OR (
+              j.turn_seq <= c.memory_through_turn_seq + 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM ai_job earlier
+                  WHERE earlier.tenant_id = j.tenant_id AND earlier.conversation_id = j.conversation_id
+                    AND earlier.epoch = j.epoch AND earlier.kind = 'MEMORY' AND earlier.turn_seq < j.turn_seq
+                    AND earlier.status IN ('ACCEPTED', 'RUNNING')
+              )
+          ))
         ORDER BY j.created_at
         LIMIT 1
         FOR UPDATE OF j SKIP LOCKED

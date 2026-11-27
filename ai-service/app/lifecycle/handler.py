@@ -45,6 +45,11 @@ def _j(v: Any) -> str:
 async def receive_event(db: Database, event: Any) -> str:
     payload = event.payload.model_dump(by_alias=True, mode="json")
     async with db.tx() as s:
+        if "epoch" in payload:
+            conversation = payload["conversationId"]
+            await _lock_inbox_scope(s, event.tenant_id, conversation)
+            if await is_revoked(s, event.tenant_id, conversation, payload["epoch"], payload.get("characterId")):
+                payload = {}
         row = (
             await s.execute(
                 text(
@@ -137,7 +142,8 @@ async def _apply_one(db: Database, inbox_id: str) -> bool:
                 return True
             if ev["aggregate_seq"] != cursor + 1:
                 return False  # gap: hold
-            await APPLIERS[ev["type"]](s, ev["tenant_id"], ev["owner_id"], ev["payload"])
+            if ev["payload"]:
+                await APPLIERS[ev["type"]](s, ev["tenant_id"], ev["owner_id"], ev["payload"])
             await s.execute(
                 text(
                     "UPDATE lifecycle_cursor SET applied_seq = :seq WHERE tenant_id=:t AND aggregate_type=:at "
@@ -156,7 +162,7 @@ async def _apply_one(db: Database, inbox_id: str) -> bool:
 
 async def _mark(s: AsyncSession, inbox_id: str, status: str, error: str | None) -> None:
     await s.execute(
-        text("UPDATE event_inbox SET status = :st, error = :err, applied_at = now() WHERE id = :id"),
+        text("UPDATE event_inbox SET status = :st, error = :err, applied_at = now(), payload = '{}'::jsonb WHERE id = :id"),
         {"st": status, "err": error, "id": inbox_id},
     )
 
@@ -231,12 +237,23 @@ _DERIVED_TABLES = (
 )
 
 
+async def _lock_inbox_scope(s: AsyncSession, tenant: str, conversation_id: str) -> None:
+    await s.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+                    {"scope": _j([tenant, conversation_id])})
+
+
 async def _purge_epoch(s: AsyncSession, tenant: str, conversation_id: str, epoch: int | None, *, include_settings: bool) -> None:
     tables = _DERIVED_TABLES + (("settings_snapshot",) if include_settings else ())
     epoch_filter = "" if epoch is None else " AND epoch = :e"
     params: dict[str, Any] = {"t": tenant, "c": conversation_id}
     if epoch is not None:
         params["e"] = epoch
+    await _lock_inbox_scope(s, tenant, conversation_id)
+    inbox_epoch = "AND payload->>'epoch' = CAST(:e AS text)" if epoch is not None else ""
+    await s.execute(text(
+        "UPDATE event_inbox SET payload = '{}'::jsonb WHERE tenant_id=:t AND payload->>'conversationId'=:c "
+        f"AND type IN ('ConversationOpened','CharacterRevisionChanged','AnswerCommitted') {inbox_epoch}"
+    ), {**params, "e": str(epoch)} if epoch is not None else params)
     for table in tables:
         await s.execute(text(f"DELETE FROM {table} WHERE tenant_id=:t AND conversation_id=:c{epoch_filter}"), params)
     # Keep job rows (status/result metadata for BE queries) but drop generated text and stream bodies.
@@ -436,7 +453,7 @@ async def apply_revision_changed(s: AsyncSession, tenant: str, owner: str, raw: 
         text("UPDATE ai_conversation SET character_rev = :cr, persona_rev = :pr WHERE id = :id"),
         {"cr": p.character_revision, "pr": p.persona_revision, "id": conv["id"]},
     )
-    # TODO(P2): mark memories that conflict with the new settings (conflicts_with_revision).
+    # Retrieval checks the source turn revision even when extraction completes after this edit.
 
 
 async def apply_conversation_reset(s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any]) -> None:

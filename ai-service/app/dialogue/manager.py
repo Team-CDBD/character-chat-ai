@@ -25,7 +25,7 @@ from app.knowledge.context_builder import (
     build,
 )
 from app.knowledge.output_policy import ChunkPolicy, PolicyBlocked, expects_banmal
-from app.knowledge.retriever import Scope, retrieve
+from app.knowledge.retriever import CHARACTER_REVISION_FILTER, Scope, retrieve
 from app.persistence.jobs import ClaimedJob, FencedJob, LeaseLost, utcnow
 from app.persistence.models import new_id
 from app.providers.base import ChatParams, PromptMessage, ProviderError, ProviderTimeout
@@ -85,8 +85,8 @@ class DialogueManager:
     # ------------------------------------------------------------ entry
     async def run_attempt(self, job: ClaimedJob) -> None:
         fenced = FencedJob(self.sv.db, job, self.cfg.lease_seconds)
-        req = GenerationRequest.model_validate(job.payload)
         try:
+            req = GenerationRequest.model_validate(job.payload)
             if job.previous_status == JobStatus.STREAMING:
                 # A previous worker died mid-stream. Partial output cannot be resumed (plan §09).
                 raise AttemptFailed(ErrorCode.PROVIDER_ERROR, "worker lost during streaming")
@@ -173,14 +173,14 @@ class DialogueManager:
         return await self._build_and_freeze(fenced, req, conv)
 
     async def _load_snapshot(self, req: GenerationRequest, snapshot_id: str | None) -> Snapshot | None:
-        where = "id = :id" if snapshot_id else "turn_seq = :ts"
+        id_filter = "AND id = :id" if snapshot_id is not None else ""
         async with self.sv.db.session() as s:
             row = (
                 await s.execute(
                     text(
                         f"""
                         SELECT * FROM context_snapshot
-                        WHERE {where} AND tenant_id = :t AND owner_id = :o AND conversation_id = :c AND epoch = :e
+                        WHERE turn_seq = :ts {id_filter} AND tenant_id = :t AND owner_id = :o AND conversation_id = :c AND epoch = :e
                           AND expires_at > now()
                         ORDER BY created_at DESC LIMIT 1
                         """
@@ -268,7 +268,7 @@ class DialogueManager:
                 degraded.append("QUERY_EMBEDDING_FAILED")
             retrieved = await retrieve(
                 s, scope, query, query_vec, self.cfg.embedding_model, now, tz,
-                top_k=self.cfg.retrieval_top_k, gate=self.cfg.retrieval_gate,
+                character_revision=req.character_revision, top_k=self.cfg.retrieval_top_k, gate=self.cfg.retrieval_gate,
             )
             degraded.extend(retrieved.degraded)
 
@@ -281,6 +281,7 @@ class DialogueManager:
             open_params: dict[str, Any] = {
                 "t": req.tenant_id, "o": req.owner_id, "c": req.conversation_id, "e": req.epoch,
             }
+            open_params["cr"] = req.character_revision
             if query_vec:
                 open_params |= {"ev": self.cfg.embedding_model, "q": json.dumps(query_vec)}
             open_rows = (
@@ -290,7 +291,7 @@ class DialogueManager:
                         SELECT u.id, u.title, u.status, u.due_at, u.created_at, {sim_sql} AS sim
                         FROM unfinished_event u JOIN memory m ON m.id = u.memory_id
                         WHERE u.tenant_id=:t AND u.owner_id=:o AND u.conversation_id=:c AND u.epoch=:e
-                          AND u.status = 'OPEN'
+                          AND u.status = 'OPEN' AND {CHARACTER_REVISION_FILTER}
                         """
                     ),
                     open_params,
@@ -362,6 +363,7 @@ class DialogueManager:
                 await fenced.append_event(s, "delta", {"text": chunk})
 
         last_error: Exception | None = None
+        result = None
         for _ in range(MAX_PROVIDER_TRIES):
             policy = ChunkPolicy(expects_banmal=expects_banmal(snap.character.get("speechStyle", "")))
             try:
@@ -376,8 +378,6 @@ class DialogueManager:
                 last_error = exc
                 if req.deadline_at <= utcnow():
                     break
-        else:
-            result = None
         if result is None:
             code = ErrorCode.PROVIDER_TIMEOUT if isinstance(last_error, ProviderTimeout) else ErrorCode.PROVIDER_ERROR
             raise AttemptFailed(code, "provider failed")

@@ -164,3 +164,34 @@ async def test_deadline_in_past_fails(client, services):
     job = (await client.post(f"{API}/generations", json=req)).json()["aiJobId"]
     await drain(services)
     assert (await client.get(f"{API}/generations/{job}")).json()["status"] == "FAILED"
+
+
+async def test_snapshot_is_bound_to_turn_and_mode(client, services, mock):
+    conv = await open_conv(client, services)
+    req = conv.generation(1, "첫 질문", T0)
+    first = (await client.post(f"{API}/generations", json=req)).json()["aiJobId"]
+    await drain(services)
+    snap = (await client.get(f"{API}/generations/{first}")).json()["contextSnapshotId"]
+    second = conv.generation(2, "다른 질문", T0, snapshot_id=snap)
+    assert (await client.post(f"{API}/generations", json=second)).status_code == 422
+    second["mode"] = "REGENERATE"
+    job = (await client.post(f"{API}/generations", json=second)).json()["aiJobId"]
+    await drain(services)
+    result = (await client.get(f"{API}/generations/{job}")).json()
+    assert result["error"]["code"] == "SNAPSHOT_EXPIRED"
+    assert len(mock.chat_calls) == 1
+
+
+async def test_timeout_at_deadline_keeps_provider_error(client, services, monkeypatch):
+    from app.dialogue import manager
+    from app.providers.base import ProviderTimeout
+
+    conv = await open_conv(client, services)
+    async def timeout(*args):
+        monkeypatch.setattr(manager, "utcnow", lambda: datetime.now(UTC) + timedelta(days=1))
+        raise ProviderTimeout("timeout")
+
+    monkeypatch.setattr(manager.composer, "generate", timeout)
+    job = (await client.post(f"{API}/generations", json=conv.generation(1, "안녕", T0))).json()["aiJobId"]
+    await drain(services)
+    assert (await client.get(f"{API}/generations/{job}")).json()["error"]["code"] == "PROVIDER_TIMEOUT"

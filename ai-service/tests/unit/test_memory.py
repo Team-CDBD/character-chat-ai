@@ -75,3 +75,13 @@ def test_reducer_supersedes_and_dedupes():
 
     existing = [ExistingMemory("m1", "USER_FACT", "user", "likes", "민트 초코")]
     assert reduce(out.memories, existing)[0].action == "SKIP_DUPLICATE"
+
+
+def test_short_self_disclosures_reach_extraction():
+    assert worth_extracting("난 대전에 살아", "")
+    assert worth_extracting("난 고양이를 키워", "")
+
+
+def test_preference_cannot_reverse_quoted_dislike():
+    result = validate(parse_extraction({"memories": [mem(predicate="likes")]}), TURN, set())
+    assert result.rejected == [("memory", "unsupported_preference")]
