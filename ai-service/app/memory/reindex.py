@@ -40,7 +40,7 @@ OUTAGE_AFTER = 3  # consecutive single-row failures that mean "provider down"
 SWEEP_LOCK_KEY = 0x6169_7265_696E  # "aireindex"; pg advisory lock shared by worker sweeps and the CLI
 _ACTIVE_GENERATION = (
     "SELECT 1 FROM ai_job WHERE kind = 'GENERATION' "
-    "AND status IN ('ACCEPTED','WAITING_CONTEXT','RUNNING','STREAMING') LIMIT 1"
+    "AND status IN ('ACCEPTED','WAITING_CONTEXT') LIMIT 1"  # queued, not in flight: steady traffic can't starve it
 )
 EMBED_TEXT = "concat_ws(' ', m.predicate, m.value, m.evidence)"
 
@@ -68,6 +68,7 @@ async def stale_counts(db: Database, model: str) -> ReindexResult:
     return ReindexResult(remaining=sum(n for _, n in rows), by_version={k: n for k, n in rows})
 
 
+# Session-level advisory lock: needs a direct PostgreSQL connection (not pgbouncer in transaction mode).
 @asynccontextmanager
 async def sweep_lock(db: Database) -> AsyncIterator[bool]:
     """Session-level advisory lock held on one connection for the whole sweep. Yields False if taken."""

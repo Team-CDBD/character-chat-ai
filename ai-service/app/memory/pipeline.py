@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge import prompts
 from app.knowledge.context_builder import CHARACTER_FIELDS, render_character
-from app.lifecycle.handler import enqueue_job
+from app.lifecycle.handler import enqueue_job, revision_attempt_id
 from app.memory import prefilter
 from app.memory.reducer import ExistingMemory, reduce
 from app.memory.reindex import EMBED_TEXT, STALE
@@ -82,7 +82,9 @@ class MemoryPipeline:
         self.cfg = services.settings
 
     async def run(self, job: ClaimedJob) -> None:
-        fenced = FencedJob(self.sv.db, job, self.cfg.lease_seconds)
+        # Each guard extends the lease past one full model call, so a slow (but in-time) call cannot lose it.
+        lease = max(self.cfg.lease_seconds, self.cfg.provider_timeout_seconds + 30)
+        fenced = FencedJob(self.sv.db, job, lease)
         try:
             if job.kind == "BASELINE":
                 await self._baseline(fenced)
@@ -217,7 +219,7 @@ class MemoryPipeline:
                 async with self.sv.db.tx() as s:
                     await fenced.guard(s)  # renew the lease around each (possibly slow) model call
                 result, usage = await self.sv.provider.complete_json(
-                    self._revision_messages(changed, cards[current_rev], current_rev, group),
+                    self._revision_messages(changed, cards[current_rev], current_rev, group, recheck=was_conflict),
                     ChatParams(model=self.cfg.extract_model, temperature=0),
                     "revision-check-v1",
                 )
@@ -250,13 +252,16 @@ class MemoryPipeline:
 
     @staticmethod
     def _revision_messages(changed: dict[str, tuple[str, str]], card: dict[str, Any], revision: int,
-                           memories: list[Any]) -> list[PromptMessage]:
+                           memories: list[Any], *, recheck: bool = False) -> list[PromptMessage]:
         fields = "\n".join(f"- {label}: {old or '(없음)'} -> {new or '(없음)'}" for label, (old, new) in changed.items())
         listed = "\n".join(
             f"- id={m['id']}{' (극중)' if m['is_fiction'] else ''}: {m['predicate']}: {m['value']} ← \"{m['evidence']}\""
             for m in memories
         )
+        # recheck: these memories conflicted with an earlier card. They are judged against the whole new card,
+        # not only the changed fields, so an unrelated edit cannot bring back a memory that still conflicts.
         body = (
+            f"<mode>{'recheck' if recheck else 'check'}</mode>\n"
             f"<changed_fields>\n{fields}\n</changed_fields>\n{render_character(card, revision)}\n"
             f"<memories>\n{listed}\n</memories>"
         )
@@ -335,9 +340,12 @@ class MemoryPipeline:
         await self._finish_memory(fenced, new_memory_ids)
 
     async def _finish_memory(self, fenced: FencedJob, pending: list[tuple[str, str]]) -> None:
-        pending = pending + await self._reindex_backlog(fenced, {mid for mid, _ in pending})
+        backlog = await self._reindex_backlog(fenced, {mid for mid, _ in pending})
+        # Separate calls: an old row the embedder keeps rejecting must not fail this turn's new memories.
         if pending:
             await self._embed(fenced, pending)
+        if backlog:
+            await self._embed(fenced, backlog)
         await self._maybe_summarize(fenced)
         async with self.sv.db.tx() as s:
             await fenced.finish(s, "COMPLETED")
@@ -433,7 +441,7 @@ class MemoryPipeline:
             ), scope)
             if current_rev is not None and current_rev > character_rev:
                 await enqueue_job(s, "REVISION", job.tenant_id, job.owner_id, job.conversation_id, job.epoch,
-                                  job.turn_seq, f"revision:{job.conversation_id}:{job.epoch}:{current_rev}:t{job.turn_seq}",
+                                  job.turn_seq, revision_attempt_id(job.conversation_id, job.epoch, current_rev, f"t{job.turn_seq}"),
                                   {"characterRevision": current_rev})
         return inserted
 
@@ -562,7 +570,7 @@ class MemoryPipeline:
                 f"SELECT m.id, {EMBED_TEXT} FROM memory m "
                 "WHERE m.tenant_id=:t AND m.owner_id=:o AND m.conversation_id=:c AND m.epoch=:e "
                 f"AND m.valid_to IS NULL AND {STALE} AND m.source_turn_seq < :ts "
-                "ORDER BY m.created_at LIMIT :n"
+                "ORDER BY (m.index_status = 'FAILED'), m.created_at LIMIT :n"
             ), {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch,
                 "ev": self.cfg.embedding_model, "ts": job.turn_seq,
                 "n": self.cfg.tuning.memory.reindex_batch})).all()

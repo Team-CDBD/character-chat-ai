@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -34,6 +35,12 @@ from app.tuning import DEFAULT_TUNING, Tuning
 
 log = logging.getLogger(__name__)
 _event_adapter: TypeAdapter[Any] = TypeAdapter(LifecycleEvent)
+
+
+def revision_attempt_id(conversation_id: str, epoch: int, revision: int, suffix: str = "") -> str:
+    """Idempotency key for a revision check; hashed when it would not fit ai_job.attempt_id (64)."""
+    key = f"revision:{conversation_id}:{epoch}:{revision}" + (f":{suffix}" if suffix else "")
+    return key if len(key) <= 64 else "revision:" + hashlib.sha256(key.encode()).hexdigest()[:48]
 
 
 def _j(v: Any) -> str:
@@ -473,7 +480,7 @@ async def apply_revision_changed(
         # in memory/pipeline.py). Until it finishes, unchecked character facts stay hidden.
         await enqueue_job(
             s, "REVISION", tenant, owner, p.conversation_id, p.epoch, 0,
-            f"revision:{p.conversation_id}:{p.epoch}:{p.character_revision}",
+            revision_attempt_id(p.conversation_id, p.epoch, p.character_revision),
             {"characterRevision": p.character_revision},
         )
 

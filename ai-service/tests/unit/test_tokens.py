@@ -34,10 +34,10 @@ def test_estimate_until_enough_samples_then_learned_ratio():
 def test_cache_shortened_counts_do_not_make_counting_optimistic():
     est = CalibratedEstimator()
     for _ in range(8):
-        est.observe([TEXT], 316)  # 1.6 chars/token: full prompt evaluated
+        est.observe([TEXT], 404)  # 1.25 chars/token: full prompt evaluated
     for _ in range(2):
         est.observe([TEXT], 104)  # prefix served from cache: looks like 5 chars/token
-    assert est.ratio() == pytest.approx(len(TEXT) / 312 / SAFETY_MARGIN)
+    assert est.ratio() == pytest.approx(len(TEXT) / 400 / SAFETY_MARGIN)
 
 
 def test_calibrated_ratio_is_capped_even_if_every_sample_is_cache_inflated():

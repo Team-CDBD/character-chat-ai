@@ -17,7 +17,8 @@ To keep such samples from making later contexts overflow ``num_ctx``:
 
 * calibration starts only after ``MIN_SAMPLES`` samples (the fixed estimate is used until then);
 * it uses a low percentile of recent samples, then a safety margin;
-* the learned ratio can never exceed ``MAX_RATIO_FACTOR`` x the default ratio;
+* the learned ratio can never exceed the default ratio (calibration only ever counts *more* tokens,
+  e.g. for a model whose tokenizer splits Korean finely);
 * samples whose reported count is at the context limit (a truncated prompt) are dropped.
 
 For production use an exact tokenizer (``AI_TOKENIZER_FILE``); calibration is the fallback.
@@ -41,7 +42,10 @@ WINDOW = 50
 PERCENTILE = 0.2
 SAFETY_MARGIN = 1.1
 MIN_SAMPLES = 10
-MAX_RATIO_FACTOR = 1.2  # never count fewer tokens than default_ratio * 1.2 chars/token would
+# Calibration may only make counting more conservative: never fewer tokens than the fixed estimate.
+# (A prompt Ollama truncated by dropping old messages reports a low count that looks like "more chars
+# per token"; it cannot be told apart reliably, so the learned ratio is not allowed to go that way.)
+MAX_RATIO_FACTOR = 1.0
 
 
 def estimate_tokens(text: str, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:

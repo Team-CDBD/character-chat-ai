@@ -30,7 +30,7 @@ def upgrade() -> None:
         INSERT INTO ai_job (id, kind, tenant_id, owner_id, conversation_id, epoch, turn_seq, attempt_id,
             payload_hash, payload, status, fencing_token, run_count, next_event_seq, degraded, created_at, updated_at)
         SELECT gen_random_uuid()::text, 'REVISION', c.tenant_id, c.owner_id, c.conversation_id, c.epoch, 0,
-               'revision:' || c.conversation_id || ':' || c.epoch || ':' || c.character_rev || ':' || 'migrate',
+               'revision:' || md5(c.conversation_id || ':' || c.epoch || ':' || c.character_rev) || ':' || 'migrate',
                '', jsonb_build_object('characterRevision', c.character_rev), 'ACCEPTED', 0, 0, 1, '[]'::jsonb,
                now(), now()
         FROM ai_conversation c

@@ -613,3 +613,35 @@ async def test_mixed_vector_dimensions_during_model_switch(client, services, moc
     await drain(services)
     body = (await client.get(f"{API}/generations/{job}")).json()
     assert body["status"] == "COMPLETED" and "KEYWORD_FALLBACK" in body["degraded"]
+
+
+def _rule_following_judge(msgs):
+    """Follows the prompt: 'check' looks only at changed fields, 'recheck' at the whole new card."""
+    body = msgs[-1].content
+    changed = body.split("<changed_fields>")[1].split("</changed_fields>")[0]
+    card = body.split("<character>")[1].split("</character>")[0]
+    says_worker = "직장인" in (card if "<mode>recheck</mode>" in body else changed)
+    return {"conflicts": [{"id": line.split("id=")[1].split(":")[0]} for line in body.splitlines()
+                          if says_worker and line.startswith("- id=") and "대학생" in line]}
+
+
+async def test_unrelated_edit_keeps_conflicting_memory_hidden(client, services, mock):
+    conv = await _conversation_with_character_facts(client, services, mock)
+    seen: list[str] = []
+    mock.json_scripts["revision-check-v1"] = lambda m: (seen.append(m[-1].content), _rule_following_judge(m))[1]
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인", "speechStyle": "존댓말"}))
+    await drain(services)
+    assert any("<mode>recheck</mode>" in c and "대학생" in c for c in seen)
+    assert await rows(services, "SELECT predicate, conflicts_with_revision FROM memory "
+                                "WHERE conflicts_with_revision IS NOT NULL") == [("직업", 3)]
+    assert "직업: 대학생" not in await _memories_in_prompt(client, services, mock, conv, 2)
+
+
+def test_revision_attempt_ids_fit_the_column():
+    from app.lifecycle.handler import revision_attempt_id
+
+    assert revision_attempt_id("conv-1", 1, 2) == "revision:conv-1:1:2"
+    long = revision_attempt_id("c" * 64, 12, 345, "t999")
+    assert len(long) <= 64 and long == revision_attempt_id("c" * 64, 12, 345, "t999")

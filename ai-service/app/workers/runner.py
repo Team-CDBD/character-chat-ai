@@ -87,7 +87,10 @@ class WorkerRunner:
             if job is None:
                 await self._sleep()
                 continue
-            await self.dialogue.run_attempt(job)
+            try:
+                await self.dialogue.run_attempt(job)
+            except Exception:  # a DB error (e.g. deadlock abort) must not kill the slot; the lease expires
+                log.exception("job crashed", extra={"job": job.id, "kind": job.kind})
 
     async def memory_slot(self, slot: int) -> None:
         owner = f"{self.worker_id}:mem{slot}"
@@ -102,7 +105,10 @@ class WorkerRunner:
             if job is None:
                 await self._sleep()
                 continue
-            await self.memory.run(job)
+            try:
+                await self.memory.run(job)
+            except Exception:  # a DB error (e.g. deadlock abort) must not kill the slot; the lease expires
+                log.exception("job crashed", extra={"job": job.id, "kind": job.kind})
 
     async def _claim(self, kind: str, owner: str):
         try:

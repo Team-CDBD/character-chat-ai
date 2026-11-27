@@ -239,6 +239,7 @@ async def requeue_failed_revisions(db: Database, after_seconds: float) -> int:
                        completed_at = NULL, updated_at = now()
                 FROM ai_conversation c
                 WHERE j.kind = 'REVISION' AND j.status = 'FAILED'
+                  AND j.error_code IN ('PROVIDER_ERROR', 'PROVIDER_TIMEOUT')  -- not e.g. a missing snapshot
                   AND j.completed_at < now() - make_interval(secs => :after)
                   AND c.tenant_id = j.tenant_id AND c.conversation_id = j.conversation_id AND c.epoch = j.epoch
                   AND c.status = 'ACTIVE'
