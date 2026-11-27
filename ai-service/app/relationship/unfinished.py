@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-DUE_WINDOW = timedelta(days=1)
-EXPIRE_AFTER = timedelta(days=14)
-MAX_EXPOSED = 2
+from app.tuning import DEFAULT_TUNING, UnfinishedTuning
+
+_D = DEFAULT_TUNING.unfinished
+DUE_WINDOW = timedelta(hours=_D.due_window_hours)
+EXPIRE_AFTER = timedelta(days=_D.expire_after_days)
+MAX_EXPOSED = _D.max_exposed
 
 
 @dataclass(frozen=True)
@@ -19,16 +22,16 @@ class OpenEventView:
     created_at: datetime
 
 
-def effective_status(ev: OpenEventView, now: datetime) -> str:
+def effective_status(ev: OpenEventView, now: datetime, tuning: UnfinishedTuning = _D) -> str:
     """DUE / EXPIRED are computed at read time, never stored."""
     if ev.status != "OPEN":
         return ev.status
     if ev.due_at is not None:
-        if now > ev.due_at + EXPIRE_AFTER:
+        if now > ev.due_at + timedelta(days=tuning.expire_after_days):
             return "EXPIRED"
-        if abs(now - ev.due_at) <= DUE_WINDOW:
+        if abs(now - ev.due_at) <= timedelta(hours=tuning.due_window_hours):
             return "DUE"
-    elif now > ev.created_at + EXPIRE_AFTER * 2:
+    elif now > ev.created_at + timedelta(days=tuning.undated_expire_after_days):
         return "EXPIRED"
     return "OPEN"
 
@@ -39,18 +42,19 @@ def select_for_context(
     similarity: dict[str, float],
     recently_mentioned: set[str],
     gate: float,
+    tuning: UnfinishedTuning = _D,
 ) -> list[tuple[OpenEventView, str]]:
     """DUE first; non-DUE only when related to the current topic; skip what the character just mentioned."""
     picked: list[tuple[OpenEventView, str, float]] = []
     for ev in events:
-        status = effective_status(ev, now)
+        status = effective_status(ev, now, tuning)
         if status not in ("OPEN", "DUE") or ev.id in recently_mentioned:
             continue
         sim = similarity.get(ev.id, 0.0)
         if status == "DUE" or sim >= gate:
             picked.append((ev, status, (1.0 if status == "DUE" else 0.0) + sim))
     picked.sort(key=lambda x: x[2], reverse=True)
-    return [(ev, status) for ev, status, _ in picked[:MAX_EXPOSED]]
+    return [(ev, status) for ev, status, _ in picked[: tuning.max_exposed]]
 
 
 def describe(ev: OpenEventView, status: str, now: datetime, tz) -> str:

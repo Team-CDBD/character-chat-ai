@@ -92,14 +92,14 @@ async def drain(sv: Services, *, generation: bool = True, memory: bool = True) -
     """Run workers deterministically until no work is left."""
     dialogue, pipeline = DialogueManager(sv), MemoryPipeline(sv)
     for _ in range(200):
-        progressed = await process_pending(sv.db) > 0
+        progressed = await process_pending(sv.db, tuning=sv.settings.tuning) > 0
         if generation:
             job = await jobs.claim(sv.db, "GENERATION", "test", sv.settings.lease_seconds)
             if job:
                 await dialogue.run_attempt(job)
                 progressed = True
         if memory:
-            for kind in ("BASELINE", "MEMORY"):
+            for kind in ("BASELINE", "REVISION", "MEMORY"):
                 job = await jobs.claim(sv.db, kind, "test", sv.settings.lease_seconds)
                 if job:
                     await pipeline.run(job)

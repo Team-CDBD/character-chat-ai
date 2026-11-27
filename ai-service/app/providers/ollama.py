@@ -24,22 +24,24 @@ class OllamaProvider:
     name = "ollama"
     count_tokens = staticmethod(estimate_tokens)
 
-    def __init__(self, base_url: str, timeout: float, *, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self, base_url: str, timeout: float, *, num_ctx: int = 8192, transport: httpx.AsyncBaseTransport | None = None
+    ):
         self.base_url = base_url
+        self.num_ctx = num_ctx
         self.timeout = timeout
         self.transport = transport
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=self.transport)
 
-    @staticmethod
-    def _payload(messages: list[PromptMessage], params: ChatParams) -> dict[str, Any]:
+    def _payload(self, messages: list[PromptMessage], params: ChatParams) -> dict[str, Any]:
         return {
             "model": params.model,
             "messages": [asdict(m) for m in messages],
             "think": False,
             "options": {
-                "num_ctx": 8192,
+                "num_ctx": self.num_ctx,
                 "temperature": params.temperature,
                 "num_predict": params.max_output_tokens,
             },

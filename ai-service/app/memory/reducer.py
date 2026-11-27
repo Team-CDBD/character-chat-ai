@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.memory.validator import ExtractedMemory, MemoryType, normalize
+from app.tuning import DEFAULT_TUNING
 
 KEYED_TYPES = {MemoryType.USER_FACT, MemoryType.SCHEDULE}
-MAX_NEW_PER_TURN = 5
+MAX_NEW_PER_TURN = DEFAULT_TUNING.memory.max_new_per_turn
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,9 @@ class MemoryDecision:
     supersedes_id: str | None = None
 
 
-def reduce(new: list[ExtractedMemory], existing: list[ExistingMemory]) -> list[MemoryDecision]:
+def reduce(
+    new: list[ExtractedMemory], existing: list[ExistingMemory], max_new: int = MAX_NEW_PER_TURN
+) -> list[MemoryDecision]:
     """``existing`` must contain only currently valid memories (valid_to IS NULL)."""
     decisions: list[MemoryDecision] = []
     by_key: dict[tuple[str, str, str], ExistingMemory] = {
@@ -34,7 +37,7 @@ def reduce(new: list[ExtractedMemory], existing: list[ExistingMemory]) -> list[M
     }
     seen_values = {(e.type, normalize(e.value)) for e in existing}
 
-    ranked = sorted(new, key=lambda m: m.importance, reverse=True)[:MAX_NEW_PER_TURN]
+    ranked = sorted(new, key=lambda m: m.importance, reverse=True)[:max_new]
     for m in ranked:
         value_key = (m.type.value, normalize(m.value))
         if m.type in KEYED_TYPES:

@@ -14,18 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.providers.base import PromptMessage
+from app.tuning import DEFAULT_TUNING, ContextTuning
 
-BUDGETS = {
-    "policy": 400,
-    "character": 1200,
-    "persona": 400,
-    "relationship": 500,
-    "memories": 900,
-    "summary": 800,
-    "time": 60,
-    "recent": 3000,
-}
-INPUT_BUDGET = sum(BUDGETS.values())  # ~7,260; output reserve (600) is separate
+BUDGETS = dict(DEFAULT_TUNING.context.budgets)  # defaults; effective values come from Settings.tuning
+INPUT_BUDGET = DEFAULT_TUNING.context.input_budget  # ~7,260; output reserve (600) is separate
 
 
 class BudgetExceeded(Exception):
@@ -117,7 +109,10 @@ def _turn_messages(t: RecentTurn) -> list[PromptMessage]:
     return out
 
 
-def build(inputs: ContextInputs, count: Callable[[str], int]) -> BuiltContext:
+def build(
+    inputs: ContextInputs, count: Callable[[str], int], tuning: ContextTuning = DEFAULT_TUNING.context
+) -> BuiltContext:
+    BUDGETS, INPUT_BUDGET = tuning.budgets, tuning.input_budget  # noqa: N806 - same names as the defaults
     degraded: list[str] = []
     tokens: dict[str, int] = {}
 

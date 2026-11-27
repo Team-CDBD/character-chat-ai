@@ -92,6 +92,13 @@ _CLAIM_ORDERED = text(
                     AND earlier.status IN ('ACCEPTED', 'RUNNING')
               )
           ))
+          -- One revision check per conversation at a time: an older and a newer check must not interleave.
+          AND (:kind <> 'REVISION' OR NOT EXISTS (
+              SELECT 1 FROM ai_job other
+              WHERE other.tenant_id = j.tenant_id AND other.conversation_id = j.conversation_id
+                AND other.epoch = j.epoch AND other.kind = 'REVISION' AND other.id <> j.id
+                AND other.status = 'RUNNING' AND other.lease_until >= now()
+          ))
         ORDER BY j.created_at
         LIMIT 1
         FOR UPDATE OF j SKIP LOCKED
@@ -216,3 +223,28 @@ def _json(data: Any) -> str:
 
 def lease_deadline(seconds: float) -> datetime:
     return utcnow() + timedelta(seconds=seconds)
+
+
+async def requeue_failed_revisions(db: Database, after_seconds: float) -> int:
+    """Give failed revision checks another chance once the model may be back.
+
+    A failed check leaves that conversation's character facts hidden (fail closed); without this they
+    would stay hidden until the next character edit.
+    """
+    async with db.tx() as s:
+        res = await s.execute(
+            text(
+                """
+                UPDATE ai_job j SET status = 'ACCEPTED', run_count = 0, error_code = NULL, error_detail = NULL,
+                       completed_at = NULL, updated_at = now()
+                FROM ai_conversation c
+                WHERE j.kind = 'REVISION' AND j.status = 'FAILED'
+                  AND j.error_code IN ('PROVIDER_ERROR', 'PROVIDER_TIMEOUT')  -- not e.g. a missing snapshot
+                  AND j.completed_at < now() - make_interval(secs => :after)
+                  AND c.tenant_id = j.tenant_id AND c.conversation_id = j.conversation_id AND c.epoch = j.epoch
+                  AND c.status = 'ACTIVE'
+                """
+            ),
+            {"after": after_seconds},
+        )
+        return res.rowcount  # type: ignore[attr-defined]

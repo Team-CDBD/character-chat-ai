@@ -166,7 +166,8 @@ sequenceDiagram
 - 입력 합계 상한은 **7,260 토큰**(출력 600은 별도)입니다. 넘으면 **관련도 낮은 기억 → 요약 앞부분 → 최근 창(최소 3턴)** 순서로 줄입니다. 그래도 넘는 아주 긴 메시지는 실패시키지 않고 최근 창을 1턴까지 줄이며 `RECENT_BELOW_MINIMUM`을 기록합니다. 그래도 안 되면 `BUDGET_EXCEEDED`.
 - 프롬프트는 **변하지 않는 계층(1~3)을 첫 system 메시지**, 변하는 계층(4~7)을 두 번째 system 메시지로 둡니다. 공급자의 프롬프트 캐싱으로 입력 비용과 첫 토큰 지연을 줄이기 위해서입니다.
 - 조립한 Context는 **`context_snapshot`에 불변으로 저장**하고 hash를 남깁니다(24시간 보존). Regenerate는 이 스냅샷을 그대로 재사용합니다.
-- Context 예산 계산의 토큰 수는 실제 모델(Ollama·OpenAI)을 써도 아직 `글자 수 / 1.5` 추정치입니다. 모델을 확정하면 공식 토크나이저로 바꿉니다. 사용량 기록(`usage_ledger`)은 공급자가 보고한 값을 우선합니다.
+- 토큰 수는 채팅 모델의 토크나이저 파일(`AI_TOKENIZER_FILE`)이나 tiktoken이 있으면 정확히 세고, 없으면 공급자가 보고한 실제 입력 토큰 수로 보정한 비율을 씁니다(보정 전과 mock은 `글자 수 / 1.5`). 사용량 기록(`usage_ledger`)은 공급자가 보고한 값을 우선합니다. 자세한 내용은 [실행 문서](ai-service/README.md#토큰-수-계산).
+- 예산 값은 기본값이며 `AI_TUNING__CONTEXT__BUDGETS__RECENT=3200`처럼 바꿀 수 있습니다([튜닝 값](ai-service/docs/tuning.md)).
 
 **Output Policy** (`output_policy.py`): 모델 출력은 문장 끝(또는 80자)까지 버퍼링한 뒤 검사하고 나서 내보냅니다. "저는 AI라서…" 같은 역할 이탈(`ROLE_BREAK`)과 반말 설정에서의 존댓말(`SPEECH_STYLE_HONORIFIC`)은 MVP에서는 **차단하지 않고 표시만** 해서 결과의 `degraded` 목록과 지표로 남깁니다. 빈 답변은 `POLICY_BLOCKED`입니다.
 
@@ -193,6 +194,8 @@ flowchart LR
 - 폐기된 Regenerate 후보와 실패한 답변은 `AnswerCommitted`에 애초에 없으므로 추출 입력이 될 수 없습니다.
 - 같은 `(type, subject, predicate)`의 새 값은 기존 기억을 **supersedes**하고(`valid_to` 설정), 검색은 유효한 기억만 봅니다. 같은 값이면 중복으로 건너뜁니다.
 - 모델 출력 일부가 깨져도 유효한 항목만 살려 씁니다.
+- `subject`는 `user`·`character`·`shared` 셋으로 정규화합니다(`assistant`→`character`, `both`→`shared` 등). 모르는 값은 근거가 사용자 발화뿐이면 `user`, 아니면 `character`로 봅니다.
+- `likes`/`dislikes`는 근거 인용에서 대상 바로 뒤의 감정 표현이 반대면 거절합니다("민트초코 진짜 싫어해" → `likes` 거절, "안 좋아해"는 `dislikes`로 인정).
 
 **검색 점수와 관련성 게이트** (`knowledge/retriever.py`):
 
@@ -203,8 +206,11 @@ flowchart LR
 - 시간 근접도: 일정형은 해석 일시가 ±2일이면 1.0, 그 외는 생성 후 경과일로 감쇠합니다.
 - **게이트 0.25 미만은 Context에 넣지 않습니다.** "많이 기억하는 척"보다 "필요할 때 정확히"가 목표입니다.
 - 임베딩이 없거나 실패한 기억은 빠뜨리지 않고 키워드 점수로 대신하며 `KEYWORD_FALLBACK`을 기록합니다.
+- **캐릭터 수정 후**: `REVISION` Job이 캐릭터·공동 기억을 새 카드와 비교해 **충돌하는 기억만** `conflicts_with_revision`으로 숨기고, 나머지는 `checked_character_rev`를 올려 계속 씁니다. 검사 전이거나 검사가 실패한 캐릭터 기억은 숨긴 채로 둡니다(보수적). 사용자 기억과 미완료 사건(약속·일정)은 수정과 상관없이 유지됩니다.
+- **임베딩 모델 변경 후**: 다른 모델로 만든 벡터는 키워드 점수로 대신하다가, 기억 Job·워커 스윕·`tools.reindex_embeddings`가 새 모델로 다시 임베딩합니다.
 
 **실패 처리**: 추출 호출이 실패하면 최대 3회 다시 시도하고, 그래도 안 되면 그 Turn은 추출을 포기하되 watermark는 올려 뒤 Turn이 막히지 않게 합니다(원본 Turn은 남아 있어 재처리 가능).
+추출 결과 저장 뒤 워커가 죽으면 다음 워커는 추출을 다시 하지 않고 임베딩·요약부터 이어 갑니다. 임베딩 실패는 Job 실패가 아닙니다. 기억은 `index_status=FAILED`로 남고, 같은 대화의 다음 기억 Job이 최대 16개씩, 워커 스윕이 60초마다 다시 색인합니다.
 
 ## 7. 관계와 미완료 사건
 
@@ -285,11 +291,11 @@ stateDiagram-v2
 
 | 엔드포인트 | 결과 | 의미 |
 |---|---|---|
-| `POST /internal/ai/v1/generations` | `202 {aiJobId, status}` | 저장 후 응답. 같은 `attemptId`+같은 본문 → 같은 Job, 본문이 다르면 `409 IDEMPOTENCY_CONFLICT`. 미등록 대화는 `404`, 차단된 epoch는 `409 EPOCH_REVOKED` |
+| `POST /internal/ai/v1/generations` | `202 {aiJobId, status}` | 저장 후 응답. `mode=NEW`에 `contextSnapshotId`를 넣으면 `422`. 같은 `attemptId`+같은 본문 → 같은 Job, 본문이 다르면 `409 IDEMPOTENCY_CONFLICT`. 미등록 대화는 `404`, 차단된 epoch는 `409 EPOCH_REVOKED` |
 | `GET /generations/{aiJobId}` | 상태, text, usage, error, snapshotId, degraded | 저장된 결과만 반환 |
 | `GET /generations/{aiJobId}/events` | SSE `accepted · delta · completed · failed` | `eventSeq` 단조 증가, `Last-Event-ID`(또는 `?after=`) 이후 재전송 |
 | `POST /lifecycle-events` | `202 {receiptId}` | Inbox 저장만 의미 (202 ≠ 반영 완료) |
-| `GET /lifecycle-events/{receiptId}` | `RECEIVED · APPLIED · FAILED` | BE가 반영·삭제 완료를 추적 |
+| `GET /lifecycle-events/{receiptId}` | `RECEIVED · APPLIED · FAILED` | BE가 반영·삭제 완료를 추적. 반영된 이벤트는 영수증·순번만 남기고 본문을 지웁니다. FAILED 본문은 원인 확인·재처리를 위해 남기며, 초기화·삭제 때 함께 지웁니다 |
 | `GET /conversations/{id}/state?tenantId=&epoch=` | watermark들 | 진단용. 기억 본문은 노출하지 않음 |
 
 Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevisionChanged`, `ConversationReset`, `CharacterDeleted`.
@@ -352,10 +358,11 @@ Ollama는 로컬 추론이라 한 번에 한 호출만 보내고 lease를 길게
 
 ### 구현하면서 정한 것 (플랜에 없거나 바뀐 점)
 - **설정 수치**: 최근 창 6턴(최소 3), 기억 대기 최대 3초, Context 대기 기본 10초, 스냅샷 보존 24시간, 요약 6턴마다, 검색 상위 8개, 게이트 0.25, 미완료 사건 게이트 0.30, lease 30초(Ollama 600초). 모두 `AI_` 환경변수로 바꿀 수 있습니다(`app/config.py`).
+- **데이터로 정할 튜닝 값**: 검색 가중치·시간 감쇠, 관계 변화량·단계 경계·일일 상한, 미완료 사건 노출 기간, Context 예산, 턴당 기억 수 등은 현재 값을 기본값으로 `app/tuning.py`에 모았고 파일·환경변수로 바꿉니다. 목록과 결정 근거는 [ai-service/docs/tuning.md](ai-service/docs/tuning.md).
 - **아주 긴 메시지**: 최소 3턴에서도 예산을 넘으면 실패 대신 최근 창을 1턴까지 줄입니다(`RECENT_BELOW_MINIMUM`).
 - **Output Policy**: 역할 이탈과 말투 위반은 측정만 하고 차단하지 않습니다(플랜의 "MVP에서는 측정만"을 따름).
 - **Pre-filter**: 짧은 맞장구·웃음은 건너뛰고, 일정·취향·감정 같은 신호 단어가 있거나 12자 이상이면 추출합니다.
-- **임베딩**: 플랜은 별도 Job이지만 지금은 기억 Job 안에서 저장 직후 실행합니다. 실패해도 기억은 남고 `index_status=FAILED`로 표시합니다.
+- **임베딩**: 플랜은 별도 Job이지만 지금은 기억 Job 안에서 저장 직후 실행합니다. 실패해도 기억은 남고 `index_status=FAILED`로 표시하며, 다음 기억 Job과 워커 스윕이 다시 색인합니다. 임베딩 모델을 바꾸면 같은 경로로 재색인합니다.
 - **관계 초기값**: 대화 시작 시 50/40/0으로 두고 `BASELINE` Job이 모델 추정치로 한 번만 덮어씁니다.
 - **모델 장애 재시도**: 스트림 시작 전 1회 추가 시도. 기억 추출은 최대 3회.
 
@@ -367,10 +374,10 @@ Ollama는 로컬 추론이라 한 번에 한 호출만 보내고 lease를 길게
 5. 사용자 일 단위 토큰 한도는 BE 원장이 소유합니다. AI는 `usage_ledger`에 용도별 사용량만 남깁니다.
 
 ### 아직 열어 둔 것 (데이터로 결정)
-- 최종 모델과 공급자 (기본은 Ollama Gemma 4 12B, OpenAI도 연결됨. 한국어 평가셋으로 비교·확정 전), 실기기 추론 속도·메모리 측정, 공식 토크나이저
-- 관계 사건 변화량·단계 경계값, 검색 가중치·게이트 임계값, 최근 창 W와 요약 주기
+- 최종 모델과 공급자 (기본은 Ollama Gemma 4 12B, OpenAI도 연결됨. 한국어 평가셋으로 비교·확정 전), 실기기 추론 속도·메모리 측정, Gemma 토크나이저 파일 배포 방식
+- 관계 사건 변화량·단계 경계값, 검색 가중치·게이트 임계값, 최근 창 W와 요약 주기 — 기본값으로 동작하며 값만 바꾸면 됩니다([tuning.md](ai-service/docs/tuning.md))
 - ANN 인덱스·별도 Vector DB 도입, Retriever·NLU 독립 서비스화
-- 설정과 충돌하는 기억 표시(`conflicts_with_revision`): 컬럼과 검색 제외는 있지만 표시하는 로직은 아직 없음
+- 설정 충돌 판정의 정확도: 모델이 판정하므로 평가셋으로 오탐(멀쩡한 기억을 숨김)·미탐 비율을 재야 합니다
 
 ## 13. 진행 상황
 
@@ -380,7 +387,7 @@ Ollama는 로컬 추론이라 한 번에 한 호출만 보내고 lease를 길게
 |---|---|---|
 | P0 계약·Mock·평가셋 | ✅ | 평가셋 20개 초안 (지금은 골든 시나리오 1개) |
 | P1 기본 생성 경로 | 🟡 | 실제 키로 종단 검증, 모델 2~3종 비교 리포트 |
-| P2 캐릭터 품질 | 🟡 | 충돌 기억 표시, 일관성 평가 기준선 |
+| P2 캐릭터 품질 | 🟡 | 일관성 평가 기준선, 설정 충돌 판정 평가 |
 | P3 장시간 대화 | 🟡 | 100턴 시나리오 검증 |
 | P4 Long-term Memory | 🟡 | 추출 모델 확정(Gemma 4 12B·OpenAI 연결됨), precision·recall 리포트, 임베딩 별도 Job |
 | P5 Relationship·미완료 사건 | 🟡 | 실제 모델 baseline, 변화량 튜닝 |
