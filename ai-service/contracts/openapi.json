@@ -1,0 +1,1585 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Character Chat AI Service",
+    "summary": "BE-AI contract /internal/ai/v1",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/internal/ai/v1/generations": {
+      "post": {
+        "summary": "Accept Generation",
+        "operationId": "accept_generation_internal_ai_v1_generations_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationAccepted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "IDEMPOTENCY_CONFLICT | ACTIVE_GENERATION_EXISTS | EPOCH_REVOKED"
+          },
+          "404": {
+            "description": "CONVERSATION_NOT_REGISTERED"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ai/v1/generations/{ai_job_id}": {
+      "get": {
+        "summary": "Get Result",
+        "description": "Stored result only; never calls the model again (plan §09 화면 이탈).",
+        "operationId": "get_result_internal_ai_v1_generations__ai_job_id__get",
+        "parameters": [
+          {
+            "name": "ai_job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ai Job Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerationResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ai/v1/generations/{ai_job_id}/events": {
+      "get": {
+        "summary": "Stream Events",
+        "operationId": "stream_events_internal_ai_v1_generations__ai_job_id__events_get",
+        "parameters": [
+          {
+            "name": "ai_job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Ai Job Id"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Alternative to the Last-Event-ID header",
+              "title": "After"
+            },
+            "description": "Alternative to the Last-Event-ID header"
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "accepted / delta / completed / failed",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ai/v1/lifecycle-events": {
+      "post": {
+        "summary": "Post Lifecycle Event",
+        "description": "202 means \"stored in the Inbox\", not \"applied\".",
+        "operationId": "post_lifecycle_event_internal_ai_v1_lifecycle_events_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ConversationOpened"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AnswerCommitted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CharacterRevisionChanged"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ConversationReset"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CharacterDeleted"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "ConversationOpened": "#/components/schemas/ConversationOpened",
+                    "AnswerCommitted": "#/components/schemas/AnswerCommitted",
+                    "CharacterRevisionChanged": "#/components/schemas/CharacterRevisionChanged",
+                    "ConversationReset": "#/components/schemas/ConversationReset",
+                    "CharacterDeleted": "#/components/schemas/CharacterDeleted"
+                  }
+                },
+                "title": "Event"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ai/v1/lifecycle-events/{receipt_id}": {
+      "get": {
+        "summary": "Get Lifecycle Receipt",
+        "operationId": "get_lifecycle_receipt_internal_ai_v1_lifecycle_events__receipt_id__get",
+        "parameters": [
+          {
+            "name": "receipt_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Receipt Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleReceipt"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ai/v1/conversations/{conversation_id}/state": {
+      "get": {
+        "summary": "Get Conversation State",
+        "description": "Diagnostics only: watermarks, never memory contents (MVP has no Memory UI).",
+        "operationId": "get_conversation_state_internal_ai_v1_conversations__conversation_id__state_get",
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "tenantId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tenantid"
+            }
+          },
+          {
+            "name": "epoch",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Epoch"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AggregateType": {
+        "type": "string",
+        "enum": [
+          "CONVERSATION",
+          "CHARACTER"
+        ],
+        "title": "AggregateType"
+      },
+      "AnswerCommitted": {
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schemaversion",
+            "default": "1.0"
+          },
+          "eventId": {
+            "type": "string",
+            "title": "Eventid"
+          },
+          "tenantId": {
+            "type": "string",
+            "title": "Tenantid"
+          },
+          "ownerId": {
+            "type": "string",
+            "title": "Ownerid"
+          },
+          "aggregateType": {
+            "$ref": "#/components/schemas/AggregateType"
+          },
+          "aggregateId": {
+            "type": "string",
+            "title": "Aggregateid"
+          },
+          "aggregateSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Aggregateseq"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurredat"
+          },
+          "type": {
+            "type": "string",
+            "const": "AnswerCommitted",
+            "title": "Type"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AnswerCommittedPayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "eventId",
+          "tenantId",
+          "ownerId",
+          "aggregateType",
+          "aggregateId",
+          "aggregateSeq",
+          "occurredAt",
+          "type",
+          "payload"
+        ],
+        "title": "AnswerCommitted"
+      },
+      "AnswerCommittedPayload": {
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "title": "Conversationid"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Epoch"
+          },
+          "turnSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Turnseq"
+          },
+          "characterRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Characterrevision"
+          },
+          "userMessage": {
+            "$ref": "#/components/schemas/ChatMessage"
+          },
+          "assistantMessage": {
+            "$ref": "#/components/schemas/AssistantMessage"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "conversationId",
+          "epoch",
+          "turnSeq",
+          "characterRevision",
+          "userMessage",
+          "assistantMessage"
+        ],
+        "title": "AnswerCommittedPayload"
+      },
+      "AssistantMessage": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "responseId": {
+            "type": "string",
+            "title": "Responseid"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 8000,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "responseId",
+          "text"
+        ],
+        "title": "AssistantMessage"
+      },
+      "CharacterCard": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 50,
+            "title": "Name"
+          },
+          "intro": {
+            "type": "string",
+            "maxLength": 300,
+            "title": "Intro",
+            "default": ""
+          },
+          "personality": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Personality",
+            "default": ""
+          },
+          "speechStyle": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Speechstyle",
+            "default": ""
+          },
+          "background": {
+            "type": "string",
+            "maxLength": 1500,
+            "title": "Background",
+            "default": ""
+          },
+          "relationshipToUser": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Relationshiptouser",
+            "default": ""
+          },
+          "extra": {
+            "type": "string",
+            "maxLength": 1500,
+            "title": "Extra",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "CharacterCard"
+      },
+      "CharacterDeleted": {
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schemaversion",
+            "default": "1.0"
+          },
+          "eventId": {
+            "type": "string",
+            "title": "Eventid"
+          },
+          "tenantId": {
+            "type": "string",
+            "title": "Tenantid"
+          },
+          "ownerId": {
+            "type": "string",
+            "title": "Ownerid"
+          },
+          "aggregateType": {
+            "$ref": "#/components/schemas/AggregateType"
+          },
+          "aggregateId": {
+            "type": "string",
+            "title": "Aggregateid"
+          },
+          "aggregateSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Aggregateseq"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurredat"
+          },
+          "type": {
+            "type": "string",
+            "const": "CharacterDeleted",
+            "title": "Type"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CharacterDeletedPayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "eventId",
+          "tenantId",
+          "ownerId",
+          "aggregateType",
+          "aggregateId",
+          "aggregateSeq",
+          "occurredAt",
+          "type",
+          "payload"
+        ],
+        "title": "CharacterDeleted"
+      },
+      "CharacterDeletedPayload": {
+        "properties": {
+          "characterId": {
+            "type": "string",
+            "title": "Characterid"
+          },
+          "conversationIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Conversationids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "characterId"
+        ],
+        "title": "CharacterDeletedPayload"
+      },
+      "CharacterRevisionChanged": {
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schemaversion",
+            "default": "1.0"
+          },
+          "eventId": {
+            "type": "string",
+            "title": "Eventid"
+          },
+          "tenantId": {
+            "type": "string",
+            "title": "Tenantid"
+          },
+          "ownerId": {
+            "type": "string",
+            "title": "Ownerid"
+          },
+          "aggregateType": {
+            "$ref": "#/components/schemas/AggregateType"
+          },
+          "aggregateId": {
+            "type": "string",
+            "title": "Aggregateid"
+          },
+          "aggregateSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Aggregateseq"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurredat"
+          },
+          "type": {
+            "type": "string",
+            "const": "CharacterRevisionChanged",
+            "title": "Type"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/CharacterRevisionChangedPayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "eventId",
+          "tenantId",
+          "ownerId",
+          "aggregateType",
+          "aggregateId",
+          "aggregateSeq",
+          "occurredAt",
+          "type",
+          "payload"
+        ],
+        "title": "CharacterRevisionChanged"
+      },
+      "CharacterRevisionChangedPayload": {
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "title": "Conversationid"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Epoch"
+          },
+          "characterRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Characterrevision"
+          },
+          "character": {
+            "$ref": "#/components/schemas/CharacterCard"
+          },
+          "personaRevision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Personarevision"
+          },
+          "persona": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserPersona"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "conversationId",
+          "epoch",
+          "characterRevision",
+          "character",
+          "personaRevision"
+        ],
+        "title": "CharacterRevisionChangedPayload"
+      },
+      "ChatMessage": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 4000,
+            "title": "Text"
+          },
+          "sentAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Sentat"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "text",
+          "sentAt"
+        ],
+        "title": "ChatMessage"
+      },
+      "ConversationOpened": {
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schemaversion",
+            "default": "1.0"
+          },
+          "eventId": {
+            "type": "string",
+            "title": "Eventid"
+          },
+          "tenantId": {
+            "type": "string",
+            "title": "Tenantid"
+          },
+          "ownerId": {
+            "type": "string",
+            "title": "Ownerid"
+          },
+          "aggregateType": {
+            "$ref": "#/components/schemas/AggregateType"
+          },
+          "aggregateId": {
+            "type": "string",
+            "title": "Aggregateid"
+          },
+          "aggregateSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Aggregateseq"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurredat"
+          },
+          "type": {
+            "type": "string",
+            "const": "ConversationOpened",
+            "title": "Type"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ConversationOpenedPayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "eventId",
+          "tenantId",
+          "ownerId",
+          "aggregateType",
+          "aggregateId",
+          "aggregateSeq",
+          "occurredAt",
+          "type",
+          "payload"
+        ],
+        "title": "ConversationOpened"
+      },
+      "ConversationOpenedPayload": {
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "title": "Conversationid"
+          },
+          "characterId": {
+            "type": "string",
+            "title": "Characterid"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Epoch"
+          },
+          "characterRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Characterrevision"
+          },
+          "character": {
+            "$ref": "#/components/schemas/CharacterCard"
+          },
+          "personaRevision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Personarevision"
+          },
+          "persona": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserPersona"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "openingScene": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpeningScene"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "conversationId",
+          "characterId",
+          "epoch",
+          "characterRevision",
+          "character",
+          "personaRevision"
+        ],
+        "title": "ConversationOpenedPayload"
+      },
+      "ConversationReset": {
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schemaversion",
+            "default": "1.0"
+          },
+          "eventId": {
+            "type": "string",
+            "title": "Eventid"
+          },
+          "tenantId": {
+            "type": "string",
+            "title": "Tenantid"
+          },
+          "ownerId": {
+            "type": "string",
+            "title": "Ownerid"
+          },
+          "aggregateType": {
+            "$ref": "#/components/schemas/AggregateType"
+          },
+          "aggregateId": {
+            "type": "string",
+            "title": "Aggregateid"
+          },
+          "aggregateSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Aggregateseq"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurredat"
+          },
+          "type": {
+            "type": "string",
+            "const": "ConversationReset",
+            "title": "Type"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ConversationResetPayload"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "eventId",
+          "tenantId",
+          "ownerId",
+          "aggregateType",
+          "aggregateId",
+          "aggregateSeq",
+          "occurredAt",
+          "type",
+          "payload"
+        ],
+        "title": "ConversationReset"
+      },
+      "ConversationResetPayload": {
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "title": "Conversationid"
+          },
+          "oldEpoch": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Oldepoch"
+          },
+          "newEpoch": {
+            "type": "integer",
+            "minimum": 2.0,
+            "title": "Newepoch"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "conversationId",
+          "oldEpoch",
+          "newEpoch"
+        ],
+        "title": "ConversationResetPayload"
+      },
+      "ConversationState": {
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "title": "Conversationid"
+          },
+          "epoch": {
+            "type": "integer",
+            "title": "Epoch"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "appliedLifecycleSeq": {
+            "type": "integer",
+            "title": "Appliedlifecycleseq"
+          },
+          "memoryThroughTurnSeq": {
+            "type": "integer",
+            "title": "Memorythroughturnseq"
+          },
+          "embeddingThroughTurnSeq": {
+            "type": "integer",
+            "title": "Embeddingthroughturnseq"
+          },
+          "characterRevision": {
+            "type": "integer",
+            "title": "Characterrevision"
+          },
+          "personaRevision": {
+            "type": "integer",
+            "title": "Personarevision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "conversationId",
+          "epoch",
+          "status",
+          "appliedLifecycleSeq",
+          "memoryThroughTurnSeq",
+          "embeddingThroughTurnSeq",
+          "characterRevision",
+          "personaRevision"
+        ],
+        "title": "ConversationState"
+      },
+      "ErrorBody": {
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "ErrorBody"
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "PROVIDER_TIMEOUT",
+          "PROVIDER_ERROR",
+          "POLICY_BLOCKED",
+          "CONTEXT_NOT_READY",
+          "BUDGET_EXCEEDED",
+          "SNAPSHOT_EXPIRED",
+          "REVOKED",
+          "INTERNAL"
+        ],
+        "title": "ErrorCode"
+      },
+      "GenerationAccepted": {
+        "properties": {
+          "aiJobId": {
+            "type": "string",
+            "title": "Aijobid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "aiJobId",
+          "status"
+        ],
+        "title": "GenerationAccepted"
+      },
+      "GenerationMode": {
+        "type": "string",
+        "enum": [
+          "NEW",
+          "REGENERATE",
+          "RETRY"
+        ],
+        "title": "GenerationMode"
+      },
+      "GenerationRequest": {
+        "properties": {
+          "schemaVersion": {
+            "type": "string",
+            "const": "1.0",
+            "title": "Schemaversion",
+            "default": "1.0"
+          },
+          "tenantId": {
+            "type": "string",
+            "title": "Tenantid"
+          },
+          "ownerId": {
+            "type": "string",
+            "title": "Ownerid"
+          },
+          "conversationId": {
+            "type": "string",
+            "title": "Conversationid"
+          },
+          "epoch": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Epoch"
+          },
+          "turnSeq": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Turnseq"
+          },
+          "attemptId": {
+            "type": "string",
+            "title": "Attemptid"
+          },
+          "responseId": {
+            "type": "string",
+            "title": "Responseid"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/GenerationMode",
+            "default": "NEW"
+          },
+          "requiredLifecycleSeq": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Requiredlifecycleseq"
+          },
+          "baseCommittedTurnSeq": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Basecommittedturnseq"
+          },
+          "characterRevision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Characterrevision"
+          },
+          "personaRevision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Personarevision"
+          },
+          "userMessage": {
+            "$ref": "#/components/schemas/ChatMessage"
+          },
+          "contextSnapshotId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contextsnapshotid"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "default": "Asia/Seoul"
+          },
+          "generationPolicyVersion": {
+            "type": "string",
+            "title": "Generationpolicyversion",
+            "default": "chat-v1"
+          },
+          "deadlineAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Deadlineat"
+          },
+          "traceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Traceid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tenantId",
+          "ownerId",
+          "conversationId",
+          "epoch",
+          "turnSeq",
+          "attemptId",
+          "responseId",
+          "requiredLifecycleSeq",
+          "baseCommittedTurnSeq",
+          "characterRevision",
+          "personaRevision",
+          "userMessage",
+          "deadlineAt"
+        ],
+        "title": "GenerationRequest"
+      },
+      "GenerationResult": {
+        "properties": {
+          "aiJobId": {
+            "type": "string",
+            "title": "Aijobid"
+          },
+          "attemptId": {
+            "type": "string",
+            "title": "Attemptid"
+          },
+          "responseId": {
+            "type": "string",
+            "title": "Responseid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Usage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contextSnapshotId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contextsnapshotid"
+          },
+          "degraded": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Degraded"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "aiJobId",
+          "attemptId",
+          "responseId",
+          "status"
+        ],
+        "title": "GenerationResult"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "ACCEPTED",
+          "WAITING_CONTEXT",
+          "RUNNING",
+          "STREAMING",
+          "COMPLETED",
+          "FAILED",
+          "REVOKED"
+        ],
+        "title": "JobStatus"
+      },
+      "LifecycleAccepted": {
+        "properties": {
+          "receiptId": {
+            "type": "string",
+            "title": "Receiptid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "receiptId"
+        ],
+        "title": "LifecycleAccepted"
+      },
+      "LifecycleReceipt": {
+        "properties": {
+          "receiptId": {
+            "type": "string",
+            "title": "Receiptid"
+          },
+          "eventId": {
+            "type": "string",
+            "title": "Eventid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/LifecycleReceiptStatus"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "appliedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appliedat"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "receiptId",
+          "eventId",
+          "status"
+        ],
+        "title": "LifecycleReceipt"
+      },
+      "LifecycleReceiptStatus": {
+        "type": "string",
+        "enum": [
+          "RECEIVED",
+          "APPLIED",
+          "FAILED"
+        ],
+        "title": "LifecycleReceiptStatus"
+      },
+      "OpeningScene": {
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "title": "Messageid"
+          },
+          "narration": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Narration",
+            "default": ""
+          },
+          "characterLine": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Characterline",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "messageId"
+        ],
+        "title": "OpeningScene"
+      },
+      "Usage": {
+        "properties": {
+          "inputTokens": {
+            "type": "integer",
+            "title": "Inputtokens",
+            "default": 0
+          },
+          "outputTokens": {
+            "type": "integer",
+            "title": "Outputtokens",
+            "default": 0
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Usage"
+      },
+      "UserPersona": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 50,
+            "title": "Name"
+          },
+          "age": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age"
+          },
+          "job": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000,
+            "title": "Description",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "UserPersona"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

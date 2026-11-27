@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "JobStatus": {
+      "enum": [
+        "ACCEPTED",
+        "WAITING_CONTEXT",
+        "RUNNING",
+        "STREAMING",
+        "COMPLETED",
+        "FAILED",
+        "REVOKED"
+      ],
+      "title": "JobStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "aiJobId": {
+      "title": "Aijobid",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/JobStatus"
+    }
+  },
+  "required": [
+    "aiJobId",
+    "status"
+  ],
+  "title": "GenerationAccepted",
+  "type": "object"
+}

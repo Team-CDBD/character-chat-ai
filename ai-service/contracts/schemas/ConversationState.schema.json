@@ -1,0 +1,49 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "conversationId": {
+      "title": "Conversationid",
+      "type": "string"
+    },
+    "epoch": {
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "appliedLifecycleSeq": {
+      "title": "Appliedlifecycleseq",
+      "type": "integer"
+    },
+    "memoryThroughTurnSeq": {
+      "title": "Memorythroughturnseq",
+      "type": "integer"
+    },
+    "embeddingThroughTurnSeq": {
+      "title": "Embeddingthroughturnseq",
+      "type": "integer"
+    },
+    "characterRevision": {
+      "title": "Characterrevision",
+      "type": "integer"
+    },
+    "personaRevision": {
+      "title": "Personarevision",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "conversationId",
+    "epoch",
+    "status",
+    "appliedLifecycleSeq",
+    "memoryThroughTurnSeq",
+    "embeddingThroughTurnSeq",
+    "characterRevision",
+    "personaRevision"
+  ],
+  "title": "ConversationState",
+  "type": "object"
+}

@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "LifecycleReceiptStatus": {
+      "enum": [
+        "RECEIVED",
+        "APPLIED",
+        "FAILED"
+      ],
+      "title": "LifecycleReceiptStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "receiptId": {
+      "title": "Receiptid",
+      "type": "string"
+    },
+    "eventId": {
+      "title": "Eventid",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/LifecycleReceiptStatus"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    },
+    "appliedAt": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Appliedat"
+    }
+  },
+  "required": [
+    "receiptId",
+    "eventId",
+    "status"
+  ],
+  "title": "LifecycleReceipt",
+  "type": "object"
+}

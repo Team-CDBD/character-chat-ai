@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "evt-AnswerCommitted-2",
+  "tenantId": "tenant-1",
+  "ownerId": "user-7",
+  "aggregateType": "CONVERSATION",
+  "aggregateId": "conv-3",
+  "aggregateSeq": 2,
+  "occurredAt": "2026-11-13T23:10:00Z",
+  "type": "AnswerCommitted",
+  "payload": {
+    "conversationId": "conv-3",
+    "epoch": 1,
+    "turnSeq": 11,
+    "characterRevision": 1,
+    "userMessage": {
+      "id": "u11",
+      "text": "나 다음 주 금요일에 면접 있어",
+      "sentAt": "2026-11-06T23:10:00Z"
+    },
+    "assistantMessage": {
+      "id": "a11",
+      "responseId": "response-11",
+      "text": "...면접? 잘 봐."
+    }
+  }
+}

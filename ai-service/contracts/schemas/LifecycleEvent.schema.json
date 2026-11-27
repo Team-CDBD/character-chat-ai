@@ -1,0 +1,716 @@
+{
+  "$defs": {
+    "AggregateType": {
+      "enum": [
+        "CONVERSATION",
+        "CHARACTER"
+      ],
+      "title": "AggregateType",
+      "type": "string"
+    },
+    "AnswerCommitted": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "eventId": {
+          "title": "Eventid",
+          "type": "string"
+        },
+        "tenantId": {
+          "title": "Tenantid",
+          "type": "string"
+        },
+        "ownerId": {
+          "title": "Ownerid",
+          "type": "string"
+        },
+        "aggregateType": {
+          "$ref": "#/$defs/AggregateType"
+        },
+        "aggregateId": {
+          "title": "Aggregateid",
+          "type": "string"
+        },
+        "aggregateSeq": {
+          "minimum": 1,
+          "title": "Aggregateseq",
+          "type": "integer"
+        },
+        "occurredAt": {
+          "format": "date-time",
+          "title": "Occurredat",
+          "type": "string"
+        },
+        "type": {
+          "const": "AnswerCommitted",
+          "title": "Type",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/AnswerCommittedPayload"
+        }
+      },
+      "required": [
+        "eventId",
+        "tenantId",
+        "ownerId",
+        "aggregateType",
+        "aggregateId",
+        "aggregateSeq",
+        "occurredAt",
+        "type",
+        "payload"
+      ],
+      "title": "AnswerCommitted",
+      "type": "object"
+    },
+    "AnswerCommittedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "turnSeq": {
+          "minimum": 1,
+          "title": "Turnseq",
+          "type": "integer"
+        },
+        "characterRevision": {
+          "minimum": 1,
+          "title": "Characterrevision",
+          "type": "integer"
+        },
+        "userMessage": {
+          "$ref": "#/$defs/ChatMessage"
+        },
+        "assistantMessage": {
+          "$ref": "#/$defs/AssistantMessage"
+        }
+      },
+      "required": [
+        "conversationId",
+        "epoch",
+        "turnSeq",
+        "characterRevision",
+        "userMessage",
+        "assistantMessage"
+      ],
+      "title": "AnswerCommittedPayload",
+      "type": "object"
+    },
+    "AssistantMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "responseId": {
+          "title": "Responseid",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 8000,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "responseId",
+        "text"
+      ],
+      "title": "AssistantMessage",
+      "type": "object"
+    },
+    "CharacterCard": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 50,
+          "title": "Name",
+          "type": "string"
+        },
+        "intro": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Intro",
+          "type": "string"
+        },
+        "personality": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Personality",
+          "type": "string"
+        },
+        "speechStyle": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Speechstyle",
+          "type": "string"
+        },
+        "background": {
+          "default": "",
+          "maxLength": 1500,
+          "title": "Background",
+          "type": "string"
+        },
+        "relationshipToUser": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Relationshiptouser",
+          "type": "string"
+        },
+        "extra": {
+          "default": "",
+          "maxLength": 1500,
+          "title": "Extra",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CharacterCard",
+      "type": "object"
+    },
+    "CharacterDeleted": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "eventId": {
+          "title": "Eventid",
+          "type": "string"
+        },
+        "tenantId": {
+          "title": "Tenantid",
+          "type": "string"
+        },
+        "ownerId": {
+          "title": "Ownerid",
+          "type": "string"
+        },
+        "aggregateType": {
+          "$ref": "#/$defs/AggregateType"
+        },
+        "aggregateId": {
+          "title": "Aggregateid",
+          "type": "string"
+        },
+        "aggregateSeq": {
+          "minimum": 1,
+          "title": "Aggregateseq",
+          "type": "integer"
+        },
+        "occurredAt": {
+          "format": "date-time",
+          "title": "Occurredat",
+          "type": "string"
+        },
+        "type": {
+          "const": "CharacterDeleted",
+          "title": "Type",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/CharacterDeletedPayload"
+        }
+      },
+      "required": [
+        "eventId",
+        "tenantId",
+        "ownerId",
+        "aggregateType",
+        "aggregateId",
+        "aggregateSeq",
+        "occurredAt",
+        "type",
+        "payload"
+      ],
+      "title": "CharacterDeleted",
+      "type": "object"
+    },
+    "CharacterDeletedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "characterId": {
+          "title": "Characterid",
+          "type": "string"
+        },
+        "conversationIds": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Conversationids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "characterId"
+      ],
+      "title": "CharacterDeletedPayload",
+      "type": "object"
+    },
+    "CharacterRevisionChanged": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "eventId": {
+          "title": "Eventid",
+          "type": "string"
+        },
+        "tenantId": {
+          "title": "Tenantid",
+          "type": "string"
+        },
+        "ownerId": {
+          "title": "Ownerid",
+          "type": "string"
+        },
+        "aggregateType": {
+          "$ref": "#/$defs/AggregateType"
+        },
+        "aggregateId": {
+          "title": "Aggregateid",
+          "type": "string"
+        },
+        "aggregateSeq": {
+          "minimum": 1,
+          "title": "Aggregateseq",
+          "type": "integer"
+        },
+        "occurredAt": {
+          "format": "date-time",
+          "title": "Occurredat",
+          "type": "string"
+        },
+        "type": {
+          "const": "CharacterRevisionChanged",
+          "title": "Type",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/CharacterRevisionChangedPayload"
+        }
+      },
+      "required": [
+        "eventId",
+        "tenantId",
+        "ownerId",
+        "aggregateType",
+        "aggregateId",
+        "aggregateSeq",
+        "occurredAt",
+        "type",
+        "payload"
+      ],
+      "title": "CharacterRevisionChanged",
+      "type": "object"
+    },
+    "CharacterRevisionChangedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "characterRevision": {
+          "minimum": 1,
+          "title": "Characterrevision",
+          "type": "integer"
+        },
+        "character": {
+          "$ref": "#/$defs/CharacterCard"
+        },
+        "personaRevision": {
+          "minimum": 0,
+          "title": "Personarevision",
+          "type": "integer"
+        },
+        "persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UserPersona"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "conversationId",
+        "epoch",
+        "characterRevision",
+        "character",
+        "personaRevision"
+      ],
+      "title": "CharacterRevisionChangedPayload",
+      "type": "object"
+    },
+    "ChatMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 4000,
+          "title": "Text",
+          "type": "string"
+        },
+        "sentAt": {
+          "format": "date-time",
+          "title": "Sentat",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "sentAt"
+      ],
+      "title": "ChatMessage",
+      "type": "object"
+    },
+    "ConversationOpened": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "eventId": {
+          "title": "Eventid",
+          "type": "string"
+        },
+        "tenantId": {
+          "title": "Tenantid",
+          "type": "string"
+        },
+        "ownerId": {
+          "title": "Ownerid",
+          "type": "string"
+        },
+        "aggregateType": {
+          "$ref": "#/$defs/AggregateType"
+        },
+        "aggregateId": {
+          "title": "Aggregateid",
+          "type": "string"
+        },
+        "aggregateSeq": {
+          "minimum": 1,
+          "title": "Aggregateseq",
+          "type": "integer"
+        },
+        "occurredAt": {
+          "format": "date-time",
+          "title": "Occurredat",
+          "type": "string"
+        },
+        "type": {
+          "const": "ConversationOpened",
+          "title": "Type",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/ConversationOpenedPayload"
+        }
+      },
+      "required": [
+        "eventId",
+        "tenantId",
+        "ownerId",
+        "aggregateType",
+        "aggregateId",
+        "aggregateSeq",
+        "occurredAt",
+        "type",
+        "payload"
+      ],
+      "title": "ConversationOpened",
+      "type": "object"
+    },
+    "ConversationOpenedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "characterId": {
+          "title": "Characterid",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "characterRevision": {
+          "minimum": 1,
+          "title": "Characterrevision",
+          "type": "integer"
+        },
+        "character": {
+          "$ref": "#/$defs/CharacterCard"
+        },
+        "personaRevision": {
+          "minimum": 0,
+          "title": "Personarevision",
+          "type": "integer"
+        },
+        "persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UserPersona"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "openingScene": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpeningScene"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "conversationId",
+        "characterId",
+        "epoch",
+        "characterRevision",
+        "character",
+        "personaRevision"
+      ],
+      "title": "ConversationOpenedPayload",
+      "type": "object"
+    },
+    "ConversationReset": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "eventId": {
+          "title": "Eventid",
+          "type": "string"
+        },
+        "tenantId": {
+          "title": "Tenantid",
+          "type": "string"
+        },
+        "ownerId": {
+          "title": "Ownerid",
+          "type": "string"
+        },
+        "aggregateType": {
+          "$ref": "#/$defs/AggregateType"
+        },
+        "aggregateId": {
+          "title": "Aggregateid",
+          "type": "string"
+        },
+        "aggregateSeq": {
+          "minimum": 1,
+          "title": "Aggregateseq",
+          "type": "integer"
+        },
+        "occurredAt": {
+          "format": "date-time",
+          "title": "Occurredat",
+          "type": "string"
+        },
+        "type": {
+          "const": "ConversationReset",
+          "title": "Type",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/ConversationResetPayload"
+        }
+      },
+      "required": [
+        "eventId",
+        "tenantId",
+        "ownerId",
+        "aggregateType",
+        "aggregateId",
+        "aggregateSeq",
+        "occurredAt",
+        "type",
+        "payload"
+      ],
+      "title": "ConversationReset",
+      "type": "object"
+    },
+    "ConversationResetPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "conversationId": {
+          "title": "Conversationid",
+          "type": "string"
+        },
+        "oldEpoch": {
+          "minimum": 1,
+          "title": "Oldepoch",
+          "type": "integer"
+        },
+        "newEpoch": {
+          "minimum": 2,
+          "title": "Newepoch",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversationId",
+        "oldEpoch",
+        "newEpoch"
+      ],
+      "title": "ConversationResetPayload",
+      "type": "object"
+    },
+    "OpeningScene": {
+      "additionalProperties": false,
+      "properties": {
+        "messageId": {
+          "title": "Messageid",
+          "type": "string"
+        },
+        "narration": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Narration",
+          "type": "string"
+        },
+        "characterLine": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Characterline",
+          "type": "string"
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "title": "OpeningScene",
+      "type": "object"
+    },
+    "UserPersona": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 50,
+          "title": "Name",
+          "type": "string"
+        },
+        "age": {
+          "anyOf": [
+            {
+              "maxLength": 20,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Age"
+        },
+        "job": {
+          "anyOf": [
+            {
+              "maxLength": 50,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Job"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 1000,
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "UserPersona",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "AnswerCommitted": "#/$defs/AnswerCommitted",
+      "CharacterDeleted": "#/$defs/CharacterDeleted",
+      "CharacterRevisionChanged": "#/$defs/CharacterRevisionChanged",
+      "ConversationOpened": "#/$defs/ConversationOpened",
+      "ConversationReset": "#/$defs/ConversationReset"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ConversationOpened"
+    },
+    {
+      "$ref": "#/$defs/AnswerCommitted"
+    },
+    {
+      "$ref": "#/$defs/CharacterRevisionChanged"
+    },
+    {
+      "$ref": "#/$defs/ConversationReset"
+    },
+    {
+      "$ref": "#/$defs/CharacterDeleted"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+name: ai-service
+
+on:
+  push:
+    paths: ["ai-service/**", ".github/workflows/ai-service.yml"]
+  pull_request:
+    paths: ["ai-service/**", ".github/workflows/ai-service.yml"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-service
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ai
+          POSTGRES_PASSWORD: ai
+          POSTGRES_DB: ai_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ai -d ai_test" --health-interval 2s --health-retries 30
+    env:
+      AI_TEST_DATABASE_URL: postgresql+asyncpg://ai:ai@localhost:5432/ai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: python -m tools.export_contracts --check
+      - run: pytest -q
