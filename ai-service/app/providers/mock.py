@@ -22,6 +22,7 @@ EMPTY_RESULTS: dict[str, dict[str, Any]] = {
     "extract-v1": {"memories": [], "relationEvents": [], "resolves": []},
     "summary-v1": {"summary": ""},
     "baseline-v1": {"trust": 50, "closeness": 40, "tension": 0},
+    "revision-check-v1": {"conflicts": []},
 }
 
 

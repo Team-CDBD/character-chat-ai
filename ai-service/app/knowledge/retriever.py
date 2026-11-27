@@ -17,20 +17,21 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge.context_builder import MemoryLine
+from app.tuning import DEFAULT_TUNING, RetrievalTuning
 from app.understanding.normalize import keywords
 
-W_SEMANTIC, W_KEYWORD, W_IMPORTANCE, W_TIME = 0.55, 0.15, 0.15, 0.15
+_D = DEFAULT_TUNING.retrieval
+W_SEMANTIC, W_KEYWORD, W_IMPORTANCE, W_TIME = _D.w_semantic, _D.w_keyword, _D.w_importance, _D.w_time
 
 
-# Facts attributed to the character are only trusted under the character revision they were said in;
-# user and shared memories stay available. The validator normalizes ``subject`` to user/character/shared,
-# and anything else is treated as character-sourced (fail closed).
+# User memories never depend on the character card. Character and shared memories are usable once
+# they were checked against the current character revision (the revision they were said in counts):
+# after an edit the revision-check job compares them with the new card, hides only the conflicting
+# ones (``conflicts_with_revision``) and bumps ``checked_character_rev`` on the rest. Character facts
+# waiting for that check are hidden (fail closed); shared memories stay visible while they wait.
 CHARACTER_REVISION_FILTER = """
-    (m.subject IN ('user', 'shared') OR EXISTS (
-        SELECT 1 FROM committed_turn source
-        WHERE source.tenant_id=m.tenant_id AND source.conversation_id=m.conversation_id
-          AND source.epoch=m.epoch AND source.turn_seq=m.source_turn_seq AND source.character_rev=:cr
-    ))
+    m.conflicts_with_revision IS NULL
+    AND (m.subject IN ('user', 'shared') OR m.checked_character_rev = :cr)
 """
 
 
@@ -56,16 +57,19 @@ def keyword_score(query_kw: set[str], doc: str) -> float:
     return min(1.0, hits / len(query_kw))
 
 
-def time_score(mem_type: str, resolved_at: datetime | None, created_at: datetime, now: datetime) -> float:
+def time_score(
+    mem_type: str, resolved_at: datetime | None, created_at: datetime, now: datetime, tuning: RetrievalTuning = _D
+) -> float:
     if mem_type in ("SCHEDULE", "UNFINISHED") and resolved_at is not None:
         days = abs((resolved_at - now).total_seconds()) / 86400
-        return 1.0 if days <= 2 else max(0.0, 1.0 - (days - 2) / 12)
+        full = tuning.schedule_full_days
+        return 1.0 if days <= full else max(0.0, 1.0 - (days - full) / tuning.schedule_fade_days)
     age_days = max(0.0, (now - created_at).total_seconds() / 86400)
-    return math.exp(-age_days / 30)
+    return math.exp(-age_days / tuning.recency_decay_days)
 
 
-def score(semantic: float, kw: float, importance: float, t: float) -> float:
-    return W_SEMANTIC * semantic + W_KEYWORD * kw + W_IMPORTANCE * importance + W_TIME * t
+def score(semantic: float, kw: float, importance: float, t: float, tuning: RetrievalTuning = _D) -> float:
+    return tuning.w_semantic * semantic + tuning.w_keyword * kw + tuning.w_importance * importance + tuning.w_time * t
 
 
 def render(row: Any, tz) -> str:
@@ -88,11 +92,12 @@ async def retrieve(
     top_k: int,
     gate: float,
     exclude_ids: set[str] | None = None,
+    tuning: RetrievalTuning = _D,
 ) -> Retrieved:
     degraded: list[str] = []
     params: dict[str, Any] = {
         "t": scope.tenant_id, "o": scope.owner_id, "c": scope.conversation_id, "e": scope.epoch,
-        "ev": embedding_version, "cr": character_revision,
+        "ev": embedding_version, "cr": character_revision, "limit": tuning.candidate_limit,
     }
     sim_sql = "NULL::float"
     if query_embedding is not None:
@@ -111,9 +116,9 @@ async def retrieve(
                        created_at, index_status, {sim_sql} AS sim
                 FROM memory m
                 WHERE tenant_id = :t AND owner_id = :o AND conversation_id = :c AND epoch = :e
-                  AND valid_to IS NULL AND conflicts_with_revision IS NULL AND {CHARACTER_REVISION_FILTER}
+                  AND valid_to IS NULL AND {CHARACTER_REVISION_FILTER}
                 ORDER BY created_at DESC
-                LIMIT 500
+                LIMIT :limit
                 """
             ),
             params,
@@ -132,7 +137,8 @@ async def retrieve(
             semantic = kw  # unindexed memories are never silently dropped: keyword stands in
         else:
             semantic = max(0.0, float(r["sim"]))
-        total = score(semantic, kw, float(r["importance"]), time_score(r["type"], r["resolved_at"], r["created_at"], now))
+        t = time_score(r["type"], r["resolved_at"], r["created_at"], now, tuning)
+        total = score(semantic, kw, float(r["importance"]), t, tuning)
         if total >= gate:
             scored.append((total, r))
     if fallback and rows:

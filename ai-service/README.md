@@ -83,9 +83,9 @@ infra/              docker-compose (로컬)
 |---|---|
 | P0 계약·Mock·평가셋 | ✅ 계약 v1 스키마·fixture, Mock BE CLI, Mock Provider, docker-compose, 골든 시나리오 1개 (평가셋 20개는 남음) |
 | P1 기본 생성 경로 | ✅ 접수·조회·SSE·서비스 인증, Job lease/fencing, StreamEvent 재전송, Inbox·Projection / ⬜ 실기기 추론 검증, 모델 비교 리포트 |
-| P2 캐릭터 품질 | 🟡 chat-v1, Context Builder v1, Snapshot·Regenerate·Retry 분류, 청크 검사·역할 이탈 지표, revision 반영 / ⬜ 충돌 기억 표식(`conflicts_with_revision`) |
+| P2 캐릭터 품질 | 🟡 chat-v1, Context Builder v1, Snapshot·Regenerate·Retry 분류, 청크 검사·역할 이탈 지표, revision 반영, 충돌 기억만 숨기는 설정 검사(`REVISION` Job) / ⬜ 일관성 평가 기준선 |
 | P3 장시간 대화 | 🟡 최근 창·축소 순서·Rolling Summary 기본 구현 / ⬜ 100턴 시나리오 검증 |
-| P4 Long-term Memory | 🟡 Pre-filter·근거 검증·supersedes·하이브리드 검색·게이트 / ⬜ 실제 추출 모델·precision 리포트, 임베딩 별도 Job 분리 |
+| P4 Long-term Memory | 🟡 Pre-filter·근거 검증·supersedes·하이브리드 검색·게이트, 임베딩 모델 변경 재색인 / ⬜ 실제 추출 모델·precision 리포트, 임베딩 별도 Job 분리 |
 | P5 Relationship | 🟡 결정적 Reducer·단계·지침·미완료 사건 수명주기 / ⬜ 실제 모델 baseline, 튜닝 |
 | P6 초기화·삭제 | 🟡 차단표식·fencing·정리·늦은 이벤트 무시 / ⬜ 삭제 영수증 상세, 지표 대시보드 |
 | P7 통합·부하 | ⬜ |
@@ -113,7 +113,7 @@ AI_PROVIDER=mock docker compose -f infra/docker-compose.yml up -d --build api wo
 
 Ollama 기본값은 워커 프로세스당 모델 호출 1개, 문맥 8192토큰이다. GPU로 구동 중인 별도 Ollama도 `AI_OLLAMA_BASE_URL`을 컨테이너에서 접근 가능한 주소로 지정해 사용할 수 있다. 기본 Compose Ollama 서비스는 CPU로 실행된다. 사용자 장비에서 속도와 메모리는 별도 측정해야 한다.
 
-모델을 직접 지정하려면 기존 공통 변수 `AI_CHAT_MODEL`, `AI_EXTRACT_MODEL`, `AI_EMBEDDING_MODEL`을 사용한다. 공급자를 바꿀 때 이 변수를 해제하면 표의 기본값을 따른다. 저장된 기억은 유지되며 다른 버전의 임베딩은 기존 키워드 검색으로 처리한다.
+모델을 직접 지정하려면 기존 공통 변수 `AI_CHAT_MODEL`, `AI_EXTRACT_MODEL`, `AI_EMBEDDING_MODEL`을 사용한다. 공급자를 바꿀 때 이 변수를 해제하면 표의 기본값을 따른다. 저장된 기억은 유지되며, 다른 임베딩 모델로 만든 벡터는 재색인이 끝날 때까지 키워드 검색으로 처리한다(아래 「임베딩 모델 변경과 재색인」).
 
 ## OpenAI로 실행
 
@@ -127,4 +127,71 @@ docker compose -f infra/docker-compose.yml up --build
 ```
 
 실제 대화와 기억 추출 입력은 설정한 제공자에게 전송되고 API 요금이 발생한다.
-생성 사용량은 공급자가 보고한 값을 우선하며 누락 시 기존 토큰 추정치를 사용한다.
+생성 사용량은 공급자가 보고한 값을 우선하며, 누락 시 아래 「토큰 수 계산」의 카운터로 센다.
+
+## 캐릭터 수정과 기억
+
+캐릭터 카드가 바뀌면(`CharacterRevisionChanged`) 이전 대화에서 저장된 캐릭터·공동 기억을 **새 카드와 비교해 충돌하는 것만** 숨긴다.
+
+1. 이벤트 적용 시 `REVISION` Job을 만든다. 기억 Job과 같은 슬롯에서 실행된다.
+2. Job은 아직 현재 revision으로 검사하지 않은 기억을 모아, 바뀐 필드(이전 값 → 새 값)와 새 카드 전체를 추출 모델에 보낸다(`prompts/revision-check-v1.txt`).
+3. 모델이 충돌이라고 답한 기억은 `conflicts_with_revision`이 찍혀 검색에서 빠지고, 나머지는 `checked_character_rev`가 현재 revision으로 올라가 계속 쓰인다. 모델이 보내지 않은 id는 무시한다. 답 형식이 틀리면(`conflicts` 목록이 없거나 id가 없는 항목) "충돌 없음"으로 보지 않고 모델 오류로 재시도한다.
+4. 검사가 끝나기 전이나 모델이 계속 실패하면(최대 3회) 미검사 **캐릭터 기억은 숨긴 채로 둔다**(이전 동작과 같은 보수적 처리). 실패한 검사는 워커가 5분 뒤 다시 대기열에 넣는다(`AI_REVISION_RETRY_AFTER_SECONDS`). 공동 기억과 사용자 기억, 미완료 사건(약속·일정)은 검사 중에도 그대로 쓰인다.
+5. 수정 전에 말한 턴의 추출이 수정 뒤에 끝나면, 그 기억에 대해 검사 Job을 한 번 더 만든다.
+6. 수정을 되돌리면 이전에 충돌로 숨긴 기억도 다시 검사해, 새 카드와 맞으면 다시 쓴다.
+7. 검사 Job은 대화마다 한 번에 하나만 돈다. 검사 중에 카드가 또 바뀌면 판정 결과를 버리고 최신 카드로 다시 판정한다. 기록은 항상 앞으로만 진행하므로 늦게 끝난 옛 검사가 새 결과를 덮지 않는다.
+8. 0004 마이그레이션은 기존 데이터 중 이전 revision 때문에 숨겨져 있던 캐릭터 기억이 있는 활성 대화마다 검사 Job을 하나씩 넣는다.
+
+비용: 카드를 수정할 때마다 그 캐릭터의 활성 대화마다 추출 모델을 기억 40개당 1회 호출한다. 기억 Job과 같은 슬롯을 쓰므로 인기 캐릭터를 수정하면 기억 처리가 잠시 밀릴 수 있다.
+
+## 토큰 수 계산
+
+Context 예산은 아래 순서로 고른 카운터로 센다. 워커 시작 로그(`token counting: ...`)와 Context 스냅샷의 `content.tokenCounter`에서 어떤 방식인지 확인할 수 있다.
+
+| 순서 | 방식 | 조건 |
+|---|---|---|
+| 1 | `exact:hf` | `AI_TOKENIZER_FILE`에 채팅 모델의 Hugging Face `tokenizer.json`을 지정 (Gemma는 Hugging Face에서 약관 동의 후 받는다) |
+| 2 | `exact:tiktoken` | OpenAI 공급자 + tiktoken 인코딩 파일을 받을 수 있는 환경 |
+| 3 | `calibrated` | 그 외(Ollama 기본). 실제 호출에서 공급자가 알려준 입력 토큰 수(`prompt_eval_count`)로 글자/토큰 비율을 보정 |
+| 4 | `estimate` | 보정 표본이 생기기 전, 그리고 Mock. `글자 수 / 1.5` |
+
+보정은 **토큰을 넉넉하게** 세도록 만들었다. Ollama는 KV 캐시로 재사용한 앞부분을 입력 토큰에서 빼고 보고하므로, 그런 표본을 그대로 믿으면 토큰을 적게 세어 `num_ctx`를 넘길 수 있다.
+
+- 표본이 10개 모이기 전에는 고정 추정치(1.5글자/토큰)를 쓴다.
+- 최근 50개 표본의 하위 20% 비율에 여유 10%를 더한다.
+- 학습한 비율은 기본값(1.5글자/토큰)을 넘지 않는다. 즉 보정은 토큰을 **더 많이** 세는 쪽으로만 작동한다(한국어를 잘게 나누는 토크나이저 대응). Ollama가 문맥 한도 때문에 오래된 메시지를 잘라 낸 호출은 구분이 어려워서 이렇게 막았다.
+- 문맥 한도에서 잘린 호출은 표본에서 뺀다.
+- 보정 값은 프로세스 메모리에만 있어 재시작하면 다시 추정치부터 시작한다.
+
+시작할 때 `입력 예산 + 출력 + 채팅 템플릿 여유(메시지당 6토큰)`가 `AI_OLLAMA_NUM_CTX`를 넘으면 오류를 낸다. 운영에서는 보정보다 토크나이저 파일을 권장한다.
+정확한 수가 필요하면 `pip install -e '.[tokenizer]'` 후 `AI_TOKENIZER_FILE`을 지정한다(Docker 이미지에는 이미 포함). Compose에서는 파일을 마운트하고 경로를 넘긴다.
+
+## 임베딩 모델 변경과 재색인
+
+`AI_EMBEDDING_MODEL`을 바꾸면 기존 기억의 벡터는 다른 모델로 만든 것이 되어 검색에서 쓰이지 않고 키워드 점수로 대신한다(`KEYWORD_FALLBACK`). 아래 세 경로가 새 모델로 다시 임베딩한다.
+
+- 기억 Job: 같은 대화의 오래된 벡터·실패한 벡터를 Job마다 최대 16개씩 처리한다. 새 기억과는 따로 호출하므로 오래된 기억 하나가 계속 실패해도 새 기억 색인은 막히지 않는다.
+- 워커 스윕: 모든 활성 대화를 대상으로 60초마다 32개씩 처리한다(`AI_REINDEX_INTERVAL_SECONDS`, `AI_REINDEX_SWEEP_BATCH`, 0이면 끔). 워커가 여러 대여도 PostgreSQL advisory lock으로 한 번에 하나만 돈다. 사용자 생성 요청이 대기열에 있으면(아직 시작 전) 스윕을 멈추고 다음 주기에 이어 간다(로컬 Ollama는 모델 슬롯이 하나라서). advisory lock은 PostgreSQL 직접 연결이 필요하다(pgbouncer transaction 모드 불가).
+- 수동 실행:
+
+```sh
+python -m tools.reindex_embeddings --status   # 남은 개수 (버전 / 상태별)
+python -m tools.reindex_embeddings            # 남은 것 전부 처리
+# Compose
+docker compose -f infra/docker-compose.yml exec worker python -m tools.reindex_embeddings
+```
+
+삭제·초기화로 지워진 기억이나 이미 다른 경로가 처리한 기억은 건너뛴다. 묶음 호출이 실패하면 한 개씩 다시 시도하고, 그래도 실패한 기억은 `FAILED`로 표시하고 다음 재시도 시각(`index_retry_at`)을 1분, 2분, 4분 … 최대 하루로 늘려 잡는다(마이그레이션 0005). 재시도는 생성 시각이 아니라 이 시각 순서로 고르므로, 계속 실패하는 기억이 뒤의 기억을 막지 않는다. 연속 3개가 모두 실패하면 공급자 장애로 보고 다음 주기로 미룬다. 실패 기록은 그 행이 아직 낡은 상태일 때만 남기므로, 기억 Job과 스윕이 같은 행을 동시에 처리해도 먼저 성공한 결과를 늦은 실패가 덮지 않는다.
+
+주의할 점:
+- 임베딩 버전은 모델 이름(`AI_EMBEDDING_MODEL`)으로만 구분한다. 같은 이름으로 `ollama pull`해서 모델 내용이 바뀌면 재색인이 일어나지 않으므로, 모델을 바꿀 때는 `embeddinggemma:<버전>`처럼 태그를 바꾼다.
+- 배포 중 워커마다 `AI_EMBEDDING_MODEL`이 다르면 서로의 벡터를 낡은 것으로 보고 번갈아 다시 만든다. 모델을 바꾸는 배포는 모든 워커를 같은 값으로 맞춘 뒤 진행한다.
+- 차원이 다른 벡터가 한 컬럼에 섞여도 검색은 현재 모델 버전 벡터끼리만 거리를 계산하므로 오류가 나지 않는다. 나중에 ANN 인덱스를 만들려면 재색인을 끝낸 뒤 차원을 고정해야 한다.
+
+## 튜닝 값
+
+검색 가중치, 관계 변화량·단계 경계, 미완료 사건 노출 기간, Context 예산 등 데이터로 정해야 할 값은 `app/tuning.py`에 지금 값을 기본값으로 모았다. 값 목록, 무엇으로 결정해야 하는지, 바꾸는 방법은 [docs/tuning.md](docs/tuning.md)에 있다.
+
+```sh
+AI_TUNING__RETRIEVAL__W_SEMANTIC=0.6 python -m tools.show_tuning
+```

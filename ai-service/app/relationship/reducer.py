@@ -10,10 +10,13 @@ import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from app.tuning import DEFAULT_TUNING, RelationshipTuning
+
+_D = DEFAULT_TUNING.relationship
 REDUCER_VERSION = "rel-reducer-v1"
 SCALE_MIN, SCALE_MAX = 0.0, 100.0
-HYSTERESIS = 3.0
-DAILY_POSITIVE_CAP = 6.0  # SHARED_EXPERIENCE / SUPPORT closeness per day
+HYSTERESIS = _D.hysteresis
+DAILY_POSITIVE_CAP = _D.daily_positive_cap  # SHARED_EXPERIENCE / SUPPORT closeness per day
 
 
 class RelationKind(StrEnum):
@@ -26,16 +29,8 @@ class RelationKind(StrEnum):
     SUPPORT = "SUPPORT"
 
 
-# kind -> (trust, closeness, tension)
-DELTAS: dict[RelationKind, tuple[float, float, float]] = {
-    RelationKind.PERSONAL_DISCLOSURE: (4, 2, 0),
-    RelationKind.PROMISE_KEPT: (5, 0, 0),
-    RelationKind.PROMISE_BROKEN: (-4, 0, 3),
-    RelationKind.CONFLICT: (0, 0, 6),
-    RelationKind.RECONCILIATION: (0, 3, -8),
-    RelationKind.SHARED_EXPERIENCE: (0, 3, 0),
-    RelationKind.SUPPORT: (0, 2, 0),
-}
+# kind -> (trust, closeness, tension); defaults live in app/tuning.py
+DELTAS: dict[RelationKind, tuple[float, float, float]] = {RelationKind(k): v for k, v in _D.deltas.items()}
 DAILY_CAPPED = {RelationKind.SHARED_EXPERIENCE, RelationKind.SUPPORT}
 
 
@@ -92,13 +87,20 @@ def event_key(kind: RelationKind, proposal: ProposedRelationEvent) -> str:
     return hashlib.sha256(basis.encode()).hexdigest()[:40]
 
 
-def baseline_state(trust: float, closeness: float, tension: float = 0.0) -> RelationState:
+def baseline_state(
+    trust: float, closeness: float, tension: float = 0.0, tuning: RelationshipTuning = _D
+) -> RelationState:
     t, c, x = _clamp(trust), _clamp(closeness), _clamp(tension)
-    return RelationState(trust=t, closeness=c, tension=x, stage=stage_of(t, c, x, previous=None))
+    return RelationState(trust=t, closeness=c, tension=x, stage=stage_of(t, c, x, previous=None, tuning=tuning))
+
+
+def default_baseline(tuning: RelationshipTuning = _D) -> RelationState:
+    return baseline_state(tuning.default_trust, tuning.default_closeness, tuning.default_tension, tuning)
 
 
 def apply_relation_events(
-    state: RelationState, proposals: list[ProposedRelationEvent], ctx: ReduceContext
+    state: RelationState, proposals: list[ProposedRelationEvent], ctx: ReduceContext,
+    tuning: RelationshipTuning = _D,
 ) -> tuple[RelationState, list[AppliedRelationEvent]]:
     trust, closeness, tension = state.trust, state.closeness, state.tension
     daily = dict(state.daily_gain)
@@ -120,10 +122,10 @@ def apply_relation_events(
         key = event_key(kind, p)
         if key in seen:
             continue
-        dt, dc, dx = DELTAS[kind]
+        dt, dc, dx = tuning.deltas[kind.value]
         if kind in DAILY_CAPPED:
             used = daily.get(ctx.day, 0.0)
-            dc = max(0.0, min(dc, DAILY_POSITIVE_CAP - used))
+            dc = max(0.0, min(dc, tuning.daily_positive_cap - used))
             daily[ctx.day] = used + dc
             if dc == 0:
                 continue
@@ -137,25 +139,26 @@ def apply_relation_events(
 
     # keep only recent days in the cap ledger
     daily = {d: v for d, v in sorted(daily.items())[-7:]}
-    new_stage = stage_of(trust, closeness, tension, previous=state.stage)
+    new_stage = stage_of(trust, closeness, tension, previous=state.stage, tuning=tuning)
     return RelationState(trust, closeness, tension, new_stage, daily), applied
 
 
-def stage_of(trust: float, closeness: float, tension: float, previous: Stage | None) -> Stage:
-    """Stage with ±3 hysteresis so the tone does not flip every turn."""
+def stage_of(
+    trust: float, closeness: float, tension: float, previous: Stage | None, tuning: RelationshipTuning = _D
+) -> Stage:
+    """Stage with hysteresis (default ±3) so the tone does not flip every turn."""
+    h = tuning.hysteresis
 
     def above(value: float, threshold: float, currently_above: bool) -> bool:
-        return value >= threshold - HYSTERESIS if currently_above else value >= threshold + (
-            HYSTERESIS if previous is not None else 0
-        )
+        return value >= threshold - h if currently_above else value >= threshold + (h if previous is not None else 0)
 
-    if above(tension, 50, previous == Stage.TENSE):
+    if above(tension, tuning.tense_tension, previous == Stage.TENSE):
         return Stage.TENSE
     was_close = previous == Stage.CLOSE
-    if above(closeness, 60, was_close) and above(trust, 55, was_close):
+    if above(closeness, tuning.close_closeness, was_close) and above(trust, tuning.close_trust, was_close):
         return Stage.CLOSE
     was_familiar_or_more = previous in (Stage.FAMILIAR, Stage.CLOSE)
-    if above(closeness, 35, was_familiar_or_more):
+    if above(closeness, tuning.familiar_closeness, was_familiar_or_more):
         return Stage.FAMILIAR
     return Stage.DISTANT
 

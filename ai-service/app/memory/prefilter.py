@@ -21,7 +21,7 @@ _SIGNALS = re.compile(
 )
 
 
-def worth_extracting(user_text: str | None, assistant_text: str) -> bool:
+def worth_extracting(user_text: str | None, assistant_text: str, min_chars: int = 12) -> bool:
     text = (user_text or "").strip()
     if not text:
         return False
@@ -33,4 +33,4 @@ def worth_extracting(user_text: str | None, assistant_text: str) -> bool:
     if _SIGNALS.search(text):
         return True
     # Longer free-form statements may still carry facts; very short ones rarely do.
-    return len(normalized) >= 12
+    return len(normalized) >= min_chars

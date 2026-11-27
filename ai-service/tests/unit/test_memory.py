@@ -1,3 +1,5 @@
+import pytest
+
 from app.memory.prefilter import worth_extracting
 from app.memory.reducer import ExistingMemory, reduce
 from app.memory.validator import TurnText, parse_extraction, validate
@@ -123,3 +125,26 @@ def test_subject_is_normalized_so_revision_filter_cannot_be_bypassed():
             sourceMessageIds=["a11"]),
     ]})
     assert [m.subject for m in validate(out, turn, set()).memories] == ["character", "character", "shared"]
+
+
+def test_revision_check_helpers_only_trust_sent_ids_and_real_changes():
+    from app.memory.pipeline import changed_fields, parse_conflicts
+
+    old = {"name": "현우", "background": "대학생", "speechStyle": "반말"}
+    new = {"name": "현우", "background": "직장인", "speechStyle": "반말", "extra": "고양이를 키운다"}
+    assert changed_fields(old, new) == {"배경": ("대학생", "직장인"), "추가 설정": ("", "고양이를 키운다")}
+    assert changed_fields(new, dict(new)) == {}
+    assert set(changed_fields(None, new)) == {"이름", "배경", "말투", "추가 설정"}
+    result = {"conflicts": [{"id": "m1"}, {"id": "zzz"}, "m2"]}
+    assert parse_conflicts(result, {"m1", "m2"}) == {"m1", "m2"}  # ids we did not send are ignored
+    assert parse_conflicts({"conflicts": []}, {"m1"}) == set()
+
+
+@pytest.mark.parametrize("bad", [{}, {"conflicts": "m1"}, {"conflicts": None}, {"conflicts": [3]},
+                                 {"conflicts": [{"reason": "no id"}]}, {"conflicts": [{"id": 7}]}, ["m1"]])
+def test_malformed_revision_check_answer_is_an_error_not_no_conflicts(bad):
+    from app.memory.pipeline import parse_conflicts
+    from app.providers.base import ProviderError
+
+    with pytest.raises(ProviderError):
+        parse_conflicts(bad, {"m1"})

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import logging
+
 from app.config import Settings
 from app.providers.base import ModelProvider, ProviderAdapter
 from app.providers.mock import MockProvider
 from app.providers.ollama import OllamaProvider
 from app.providers.openai import OpenAIProvider
+from app.providers.tokens import TokenCounter, load_hf_tokenizer, load_tiktoken
+
+log = logging.getLogger(__name__)
 
 
 def build_provider(settings: Settings) -> ModelProvider:
     if settings.provider == "ollama":
-        return OllamaProvider(settings.ollama_base_url, settings.provider_timeout_seconds)
+        return OllamaProvider(settings.ollama_base_url, settings.provider_timeout_seconds,
+                              num_ctx=settings.ollama_num_ctx)
     if settings.provider == "mock":
         return MockProvider(chunk_delay=0.02)
     if settings.provider == "openai":
@@ -24,9 +30,49 @@ def build_provider(settings: Settings) -> ModelProvider:
     raise ValueError(f"unknown provider: {settings.provider}")
 
 
+def build_counter(settings: Settings, provider: ModelProvider) -> TokenCounter:
+    if settings.tokenizer_file:
+        return TokenCounter(exact=load_hf_tokenizer(settings.tokenizer_file), exact_source="exact:hf")
+    if provider.name == "openai":
+        exact = load_tiktoken(settings.chat_model)
+        if exact is not None:
+            return TokenCounter(exact=exact, exact_source="exact:tiktoken")
+    if provider.name == "mock":
+        return TokenCounter(calibrate=False, fallback=provider.count_tokens)
+    limit = settings.ollama_num_ctx if settings.provider == "ollama" else None
+    return TokenCounter(calibrate=settings.token_calibration, fallback=provider.count_tokens, context_limit=limit)
+
+
+TEMPLATE_TOKENS_PER_MESSAGE = 6  # chat-template markers per message (Gemma: <start_of_turn>role ... <end_of_turn>)
+TEMPLATE_TOKENS_FIXED = 8  # BOS + generation prompt
+
+
+def template_reserve(settings: Settings) -> int:
+    """Tokens the chat template adds on top of the counted content: 2 system messages, the current user
+    message and up to 2 messages per turn of the (possibly widened) recent window."""
+    messages = 3 + 2 * (settings.recent_window_turns + 1)
+    return TEMPLATE_TOKENS_PER_MESSAGE * messages + TEMPLATE_TOKENS_FIXED
+
+
+def check_context_fits(settings: Settings) -> None:
+    ctx = settings.tuning.context
+    need = ctx.input_budget + ctx.output_tokens + template_reserve(settings)
+    if settings.provider == "ollama" and need > settings.ollama_num_ctx:
+        raise ValueError(
+            f"context budget {ctx.input_budget} + output {ctx.output_tokens} + template "
+            f"{template_reserve(settings)} tokens exceeds AI_OLLAMA_NUM_CTX={settings.ollama_num_ctx}"
+        )
+
+
 def build_adapter(settings: Settings, provider: ModelProvider | None = None) -> ProviderAdapter:
-    return ProviderAdapter(
-        provider or build_provider(settings),
+    check_context_fits(settings)
+    provider = provider or build_provider(settings)
+    adapter = ProviderAdapter(
+        provider,
         timeout_seconds=settings.provider_timeout_seconds,
         max_concurrency=settings.provider_max_concurrency,
+        counter=build_counter(settings, provider),
+        count_model=settings.chat_model,
     )
+    log.info("token counting: %s", adapter.token_count_source)
+    return adapter

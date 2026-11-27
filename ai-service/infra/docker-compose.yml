@@ -12,6 +12,12 @@ x-ai-env: &ai-env
   AI_EMBEDDING_MODEL:
   AI_OLLAMA_BASE_URL: ${AI_OLLAMA_BASE_URL:-http://ollama:11434}
   AI_OPENAI_API_KEY: ${AI_OPENAI_API_KEY:-}
+  # Optional: exact token counts for Gemma. Put tokenizer.json in ai-service/infra/local/ and set
+  # AI_TOKENIZER_FILE=/srv/local/tokenizer.json (the folder is mounted read-only below).
+  AI_TOKENIZER_FILE:
+  # Optional: tuning overrides as a JSON file, e.g. AI_TUNING_FILE=/srv/local/tuning.json (docs/tuning.md)
+  AI_TUNING_FILE:
+  AI_REINDEX_INTERVAL_SECONDS:
 
 services:
   ollama:
@@ -42,6 +48,7 @@ services:
   api:
     build: ..
     environment: *ai-env
+    volumes: ["./local:/srv/local:ro"]
     ports: ["8080:8080"]
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -50,6 +57,7 @@ services:
     build: ..
     command: ["python", "-m", "app.workers.runner"]
     environment: *ai-env
+    volumes: ["./local:/srv/local:ro"]
     depends_on:
       migrate: { condition: service_completed_successfully }
 

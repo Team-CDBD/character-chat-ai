@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -29,10 +30,17 @@ from app.api.schemas import (
 )
 from app.persistence.db import Database
 from app.persistence.models import new_id
-from app.relationship.reducer import baseline_state
+from app.relationship.reducer import default_baseline
+from app.tuning import DEFAULT_TUNING, Tuning
 
 log = logging.getLogger(__name__)
 _event_adapter: TypeAdapter[Any] = TypeAdapter(LifecycleEvent)
+
+
+def revision_attempt_id(conversation_id: str, epoch: int, revision: int, suffix: str = "") -> str:
+    """Idempotency key for a revision check; hashed when it would not fit ai_job.attempt_id (64)."""
+    key = f"revision:{conversation_id}:{epoch}:{revision}" + (f":{suffix}" if suffix else "")
+    return key if len(key) <= 64 else "revision:" + hashlib.sha256(key.encode()).hexdigest()[:48]
 
 
 def _j(v: Any) -> str:
@@ -85,7 +93,7 @@ async def receive_event(db: Database, event: Any) -> str:
         return existing
 
 
-async def process_pending(db: Database, batch: int = 50) -> int:
+async def process_pending(db: Database, batch: int = 50, tuning: Tuning = DEFAULT_TUNING) -> int:
     """Apply ready events. Returns how many were applied (or failed)."""
     async with db.session() as s:
         rows = (
@@ -106,12 +114,12 @@ async def process_pending(db: Database, batch: int = 50) -> int:
         ).all()
     done = 0
     for (inbox_id,) in rows:
-        if await _apply_one(db, inbox_id):
+        if await _apply_one(db, inbox_id, tuning):
             done += 1
     return done
 
 
-async def _apply_one(db: Database, inbox_id: str) -> bool:
+async def _apply_one(db: Database, inbox_id: str, tuning: Tuning) -> bool:
     try:
         async with db.tx() as s:
             ev = (
@@ -145,7 +153,7 @@ async def _apply_one(db: Database, inbox_id: str) -> bool:
             if ev["aggregate_seq"] != cursor + 1:
                 return False  # gap: hold
             if ev["payload"]:
-                await APPLIERS[ev["type"]](s, ev["tenant_id"], ev["owner_id"], ev["payload"])
+                await APPLIERS[ev["type"]](s, ev["tenant_id"], ev["owner_id"], ev["payload"], tuning)
             await s.execute(
                 text(
                     "UPDATE lifecycle_cursor SET applied_seq = :seq WHERE tenant_id=:t AND aggregate_type=:at "
@@ -292,6 +300,7 @@ async def _open_epoch(
     character: dict[str, Any],
     persona: dict[str, Any] | None,
     opening_scene: dict[str, Any] | None,
+    tuning: Tuning = DEFAULT_TUNING,
 ) -> None:
     inserted = (
         await s.execute(
@@ -340,7 +349,7 @@ async def _open_epoch(
                      + (opening_scene.get("characterLine") or "")).strip(),
              "cr": character_rev},
         )
-    base = baseline_state(50, 40, 0)
+    base = default_baseline(tuning.relationship)
     await s.execute(
         text(
             """
@@ -374,14 +383,16 @@ async def enqueue_job(
     )
 
 
-async def apply_conversation_opened(s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any]) -> None:
+async def apply_conversation_opened(
+    s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any], tuning: Tuning = DEFAULT_TUNING
+) -> None:
     p = ConversationOpenedPayload.model_validate(raw)
     if await is_revoked(s, tenant, p.conversation_id, p.epoch, p.character_id):
         return
     await _open_epoch(
         s, tenant, owner, p.conversation_id, p.character_id, p.epoch, p.character_revision, p.persona_revision,
         p.character.model_dump(by_alias=True), p.persona.model_dump(by_alias=True) if p.persona else None,
-        p.opening_scene.model_dump(by_alias=True) if p.opening_scene else None,
+        p.opening_scene.model_dump(by_alias=True) if p.opening_scene else None, tuning,
     )
 
 
@@ -397,7 +408,9 @@ async def _active_conversation(s: AsyncSession, tenant: str, owner: str, convers
     ).mappings().first()
 
 
-async def apply_answer_committed(s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any]) -> None:
+async def apply_answer_committed(
+    s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any], tuning: Tuning = DEFAULT_TUNING
+) -> None:
     p = AnswerCommittedPayload.model_validate(raw)
     conv = await _active_conversation(s, tenant, owner, p.conversation_id, p.epoch)
     if conv is None:
@@ -428,7 +441,9 @@ async def apply_answer_committed(s: AsyncSession, tenant: str, owner: str, raw: 
     )
 
 
-async def apply_revision_changed(s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any]) -> None:
+async def apply_revision_changed(
+    s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any], tuning: Tuning = DEFAULT_TUNING
+) -> None:
     p = CharacterRevisionChangedPayload.model_validate(raw)
     conv = await _active_conversation(s, tenant, owner, p.conversation_id, p.epoch)
     if conv is None:
@@ -460,10 +475,19 @@ async def apply_revision_changed(s: AsyncSession, tenant: str, owner: str, raw: 
         text("UPDATE ai_conversation SET character_rev = :cr, persona_rev = :pr WHERE id = :id"),
         {"cr": p.character_revision, "pr": p.persona_revision, "id": conv["id"]},
     )
-    # Retrieval checks the source turn revision even when extraction completes after this edit.
+    if p.character_revision > conv["character_rev"]:
+        # Hide only the character/shared memories that conflict with the new card (see the revision check
+        # in memory/pipeline.py). Until it finishes, unchecked character facts stay hidden.
+        await enqueue_job(
+            s, "REVISION", tenant, owner, p.conversation_id, p.epoch, 0,
+            revision_attempt_id(p.conversation_id, p.epoch, p.character_revision),
+            {"characterRevision": p.character_revision},
+        )
 
 
-async def apply_conversation_reset(s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any]) -> None:
+async def apply_conversation_reset(
+    s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any], tuning: Tuning = DEFAULT_TUNING
+) -> None:
     p = ConversationResetPayload.model_validate(raw)
     old = (
         await s.execute(
@@ -489,11 +513,13 @@ async def apply_conversation_reset(s: AsyncSession, tenant: str, owner: str, raw
     # Settings, persona and opening scene are kept (plan §09); everything derived starts over.
     await _open_epoch(
         s, tenant, owner, p.conversation_id, old["character_id"], p.new_epoch, old["character_rev"],
-        old["persona_rev"], settings["character_card"], settings["persona"], settings["opening_scene"],
+        old["persona_rev"], settings["character_card"], settings["persona"], settings["opening_scene"], tuning,
     )
 
 
-async def apply_character_deleted(s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any]) -> None:
+async def apply_character_deleted(
+    s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any], tuning: Tuning = DEFAULT_TUNING
+) -> None:
     p = CharacterDeletedPayload.model_validate(raw)
     await s.execute(
         text(

@@ -269,6 +269,7 @@ class DialogueManager:
             retrieved = await retrieve(
                 s, scope, query, query_vec, self.cfg.embedding_model, now, tz,
                 character_revision=req.character_revision, top_k=self.cfg.retrieval_top_k, gate=self.cfg.retrieval_gate,
+                tuning=self.cfg.tuning.retrieval,
             )
             degraded.extend(retrieved.degraded)
 
@@ -303,7 +304,8 @@ class DialogueManager:
         events = [OpenEventView(r["id"], r["title"], r["status"], r["due_at"], r["created_at"]) for r in open_rows]
         mentioned = {e.id for e in events if e.title and e.title[:6] in recent_assistant}
         picked = select_for_context(
-            events, now, {r["id"]: float(r["sim"] or 0) for r in open_rows}, mentioned, self.cfg.unfinished_gate
+            events, now, {r["id"]: float(r["sim"] or 0) for r in open_rows}, mentioned, self.cfg.unfinished_gate,
+            self.cfg.tuning.unfinished,
         )
 
         character = settings["character_card"]
@@ -323,13 +325,17 @@ class DialogueManager:
             min_recent_window=self.cfg.min_recent_window_turns,
         )
         try:
-            built = build(inputs, self.sv.provider.count_tokens)
+            built = build(inputs, self.sv.provider.count_tokens, self.cfg.tuning.context)
         except BudgetExceeded as exc:
             raise AttemptFailed(ErrorCode.BUDGET_EXCEEDED, str(exc)) from exc
         degraded.extend(built.degraded)
 
         snapshot_id = new_id()
-        content = built.content() | {"character": character}
+        content = built.content() | {
+            "character": character,
+            "tokenCounter": self.sv.provider.token_count_source,
+            "tuningVersion": self.cfg.tuning.version(),
+        }
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             await s.execute(
@@ -351,8 +357,10 @@ class DialogueManager:
 
     # ------------------------------------------------------------ compose
     async def compose(self, fenced: FencedJob, req: GenerationRequest, snap: Snapshot) -> None:
-        temperature = 0.8 + (self.cfg.regenerate_temperature_bump if req.mode == GenerationMode.REGENERATE else 0)
-        params = ChatParams(model=self.cfg.chat_model, temperature=temperature, max_output_tokens=600)
+        ctx = self.cfg.tuning.context
+        bump = self.cfg.regenerate_temperature_bump if req.mode == GenerationMode.REGENERATE else 0
+        params = ChatParams(model=self.cfg.chat_model, temperature=ctx.chat_temperature + bump,
+                            max_output_tokens=ctx.output_tokens)
         started = False
 
         async def emit(chunk: str) -> None:

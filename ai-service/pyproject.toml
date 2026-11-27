@@ -17,6 +17,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Exact token counts: tiktoken for OpenAI models, tokenizers for a Hugging Face tokenizer.json
+# (e.g. Gemma, via AI_TOKENIZER_FILE). Without them the service uses a calibrated estimate.
+tokenizer = [
+    "tiktoken>=0.7",
+    "tokenizers>=0.19",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",

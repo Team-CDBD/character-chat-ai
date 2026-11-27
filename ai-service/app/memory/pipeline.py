@@ -19,9 +19,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge import prompts
-from app.knowledge.retriever import CHARACTER_REVISION_FILTER
+from app.knowledge.context_builder import CHARACTER_FIELDS, render_character
+from app.lifecycle.handler import enqueue_job, revision_attempt_id
 from app.memory import prefilter
 from app.memory.reducer import ExistingMemory, reduce
+from app.memory.reindex import DUE, DUE_ORDER, EMBED_TEXT, MARK_FAILED_SQL, STALE
 from app.memory.validator import EXTRACTOR_VERSION, MemoryType, TurnText, parse_extraction, validate
 from app.persistence.jobs import ClaimedJob, FencedJob, LeaseLost
 from app.persistence.models import new_id
@@ -34,16 +36,53 @@ from app.relationship.reducer import (
     Stage,
     apply_relation_events,
     baseline_state,
+    default_baseline,
 )
 from app.services import Services
 
 log = logging.getLogger(__name__)
-MAX_RUNS = 3
-REINDEX_BATCH = 16  # earlier unindexed memories retried per memory job
 
 
 def _j(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False, default=str)
+
+
+# Memories (character/shared) that still have to be judged against revision :cr.
+_NEEDS_CHECK = (
+    "((m.conflicts_with_revision IS NULL AND COALESCE(m.checked_character_rev, 0) < :cr) "
+    "OR m.conflicts_with_revision < :cr)"
+)
+
+
+def changed_fields(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    """Card fields whose text differs, keyed by their Korean label. An unknown old card counts as empty."""
+    old = old or {}
+    out: dict[str, tuple[str, str]] = {}
+    for key, label in CHARACTER_FIELDS:
+        before, after = str(old.get(key) or ""), str(new.get(key) or "")
+        if before != after:
+            out[label] = (before, after)
+    return out
+
+
+def parse_conflicts(result: dict[str, Any], allowed: set[str]) -> set[str]:
+    """Conflicting ids from the model's answer. Only ids we sent are accepted.
+
+    A malformed answer (no ``conflicts`` list, an entry without a string id) raises ProviderError so the
+    job retries: treating it as "no conflicts" would mark every memory in the batch compatible and could
+    even bring back memories hidden by an earlier check. Well-formed ids we did not send are ignored.
+    """
+    items = result.get("conflicts") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        raise ProviderError("revision-check answer has no conflicts list")
+    out: set[str] = set()
+    for item in items:
+        mid = item.get("id") if isinstance(item, dict) else item
+        if not isinstance(mid, str):
+            raise ProviderError("revision-check answer has an entry without an id")
+        if mid in allowed:
+            out.add(mid)
+    return out
 
 
 class MemoryPipeline:
@@ -52,10 +91,14 @@ class MemoryPipeline:
         self.cfg = services.settings
 
     async def run(self, job: ClaimedJob) -> None:
-        fenced = FencedJob(self.sv.db, job, self.cfg.lease_seconds)
+        # Each guard extends the lease past one full model call, so a slow (but in-time) call cannot lose it.
+        lease = max(self.cfg.lease_seconds, self.cfg.provider_timeout_seconds + 30)
+        fenced = FencedJob(self.sv.db, job, lease)
         try:
             if job.kind == "BASELINE":
                 await self._baseline(fenced)
+            elif job.kind == "REVISION":
+                await self._revision_check(fenced)
             else:
                 await self._memory(fenced)
         except LeaseLost:
@@ -67,7 +110,7 @@ class MemoryPipeline:
         job = fenced.job
         try:
             async with self.sv.db.tx() as s:
-                if job.run_count < MAX_RUNS:
+                if job.run_count < self.cfg.tuning.memory.max_runs:
                     await fenced.guard(s, status="ACCEPTED", error_code="PROVIDER_ERROR")
                     return
                 # Give up on extraction for this turn but keep the watermark moving: the raw turn
@@ -97,10 +140,12 @@ class MemoryPipeline:
             ChatParams(model=self.cfg.extract_model, temperature=0),
             "baseline-v1",
         )
+        rel_tuning = self.cfg.tuning.relationship
         try:
-            base = baseline_state(float(result["trust"]), float(result["closeness"]), float(result.get("tension", 0)))
+            base = baseline_state(float(result["trust"]), float(result["closeness"]), float(result.get("tension", 0)),
+                                  rel_tuning)
         except (KeyError, TypeError, ValueError):
-            base = baseline_state(50, 40, 0)
+            base = default_baseline(rel_tuning)
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             await s.execute(
@@ -116,6 +161,121 @@ class MemoryPipeline:
             )
             await self._ledger(s, job, "baseline", usage)
             await fenced.finish(s, "COMPLETED")
+
+    # ------------------------------------------------------------ revision check
+    async def _revision_check(self, fenced: FencedJob) -> None:
+        """Hide only the character/shared memories that contradict the current character card.
+
+        Candidates are memories not yet checked against the conversation's current revision, plus
+        memories marked as conflicting under an older revision (a later edit may have undone the change).
+        Each group is judged by the extraction model against the card it was last judged with; ids it
+        names (and only ids we sent) get ``conflicts_with_revision``, the rest become usable under the
+        current revision. Writes only land if the conversation is still at the revision that was judged
+        and only ever move a row forward, so a slow job for an older edit cannot undo a newer one.
+        If the model keeps failing, the job ends FAILED, the unchecked character facts stay hidden
+        (fail closed), and the worker re-queues the job later (``requeue_failed_revisions``).
+        """
+        job = fenced.job
+        scope = {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch}
+        batch = self.cfg.tuning.memory.revision_check_batch
+        if job.run_count > 3 * self.cfg.tuning.memory.max_runs:
+            # Lost its lease again and again (slow model): stop paying for the same calls.
+            async with self.sv.db.tx() as s:
+                await fenced.finish(s, "FAILED", error_code="PROVIDER_TIMEOUT", error_detail="lease lost repeatedly")
+            return
+        usages: list[Any] = []
+        while True:
+            async with self.sv.db.session() as s:
+                current_rev = await s.scalar(text(
+                    "SELECT character_rev FROM ai_conversation WHERE tenant_id=:t AND owner_id=:o "
+                    "AND conversation_id=:c AND epoch=:e AND status='ACTIVE'"
+                ), scope)
+                if current_rev is None:
+                    break
+                cards = {
+                    rev: card for rev, card in (await s.execute(text(
+                        "SELECT DISTINCT ON (character_rev) character_rev, character_card FROM settings_snapshot "
+                        "WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e ORDER BY character_rev, created_at DESC"
+                    ), scope)).all()
+                }
+                rows = (await s.execute(text(
+                    f"SELECT id, subject, predicate, value, evidence, is_fiction, checked_character_rev, "
+                    f"conflicts_with_revision FROM memory m WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c "
+                    f"AND epoch=:e AND valid_to IS NULL AND subject <> 'user' AND {_NEEDS_CHECK} "
+                    f"ORDER BY created_at LIMIT :n"
+                ), {**scope, "cr": current_rev, "n": batch})).mappings().all()
+            if not rows:
+                break
+            if current_rev not in cards:
+                log.error("revision check: no settings snapshot for revision", extra={"job": job.id})
+                async with self.sv.db.tx() as s:
+                    await fenced.finish(s, "FAILED", error_code="INTERNAL", error_detail="settings snapshot missing")
+                return
+            conflicts: set[str] = set()
+            # One call per (state, revision) so the model sees exactly what changed for those memories.
+            groups: dict[tuple[bool, int | None], list[Any]] = {}
+            for r in rows:
+                was_conflict = r["conflicts_with_revision"] is not None
+                rev = r["conflicts_with_revision"] if was_conflict else r["checked_character_rev"]
+                groups.setdefault((was_conflict, rev), []).append(r)
+            for (was_conflict, old_rev), group in groups.items():
+                changed = changed_fields(cards.get(old_rev) if old_rev is not None else None, cards[current_rev])
+                if not changed:
+                    # Same card text: compatible memories stay compatible, conflicting ones stay conflicting.
+                    if was_conflict:
+                        conflicts |= {r["id"] for r in group}
+                    continue
+                async with self.sv.db.tx() as s:
+                    await fenced.guard(s)  # renew the lease around each (possibly slow) model call
+                result, usage = await self.sv.provider.complete_json(
+                    self._revision_messages(changed, cards[current_rev], current_rev, group, recheck=was_conflict),
+                    ChatParams(model=self.cfg.extract_model, temperature=0),
+                    "revision-check-v1",
+                )
+                usages.append(usage)
+                conflicts |= parse_conflicts(result, {r["id"] for r in group})
+            async with self.sv.db.tx() as s:
+                await fenced.guard(s)
+                for usage in usages:
+                    await self._ledger(s, job, "revision", usage)
+                usages = []
+                still = await s.scalar(text(
+                    "SELECT character_rev FROM ai_conversation WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e "
+                    "FOR SHARE"
+                ), scope)
+                if still != current_rev:
+                    continue  # edited again while we were judging: judge against the newer card instead
+                ids = [r["id"] for r in rows]
+                guard_sql = (
+                    f"WHERE id = ANY(:ids) AND tenant_id=:t AND conversation_id=:c AND epoch=:e AND {_NEEDS_CHECK}"
+                )
+                await s.execute(text(f"UPDATE memory m SET conflicts_with_revision = :cr {guard_sql}"),
+                                {**scope, "cr": current_rev, "ids": [i for i in ids if i in conflicts]})
+                await s.execute(text(
+                    f"UPDATE memory m SET checked_character_rev = :cr, conflicts_with_revision = NULL {guard_sql}"
+                ), {**scope, "cr": current_rev, "ids": [i for i in ids if i not in conflicts]})
+            if len(rows) < batch:
+                break
+        async with self.sv.db.tx() as s:
+            await fenced.finish(s, "COMPLETED")
+
+    @staticmethod
+    def _revision_messages(changed: dict[str, tuple[str, str]], card: dict[str, Any], revision: int,
+                           memories: list[Any], *, recheck: bool = False) -> list[PromptMessage]:
+        fields = "\n".join(f"- {label}: {old or '(없음)'} -> {new or '(없음)'}" for label, (old, new) in changed.items())
+        listed = "\n".join(
+            f"- id={m['id']}{' (극중)' if m['is_fiction'] else ''}: {m['predicate']}: {m['value']} ← \"{m['evidence']}\""
+            for m in memories
+        )
+        # recheck: these memories conflicted with an earlier card. They are judged against the whole new card,
+        # not only the changed fields, so an unrelated edit cannot bring back a memory that still conflicts.
+        body = (
+            f"<mode>{'recheck' if recheck else 'check'}</mode>\n"
+            f"<changed_fields>\n{fields}\n</changed_fields>\n{render_character(card, revision)}\n"
+            f"<memories>\n{listed}\n</memories>"
+        )
+        return [PromptMessage("system", prompts.load("revision-check-v1")), PromptMessage("user", body)]
+
 
     # ------------------------------------------------------------ memory
     async def _memory(self, fenced: FencedJob) -> None:
@@ -168,7 +328,7 @@ class MemoryPipeline:
         )
         report = None
         usage = None
-        if prefilter.worth_extracting(turn.user_text, turn.assistant_text):
+        if prefilter.worth_extracting(turn.user_text, turn.assistant_text, self.cfg.tuning.memory.prefilter_min_chars):
             raw, usage = await self.sv.provider.complete_json(
                 self._extract_messages(turn, turn_row["sent_at"], open_events),
                 ChatParams(model=self.cfg.extract_model, temperature=0),
@@ -189,9 +349,12 @@ class MemoryPipeline:
         await self._finish_memory(fenced, new_memory_ids)
 
     async def _finish_memory(self, fenced: FencedJob, pending: list[tuple[str, str]]) -> None:
-        pending = pending + await self._reindex_backlog(fenced, {mid for mid, _ in pending})
+        backlog = await self._reindex_backlog(fenced, {mid for mid, _ in pending})
+        # Separate calls: an old row the embedder keeps rejecting must not fail this turn's new memories.
         if pending:
             await self._embed(fenced, pending)
+        if backlog:
+            await self._embed(fenced, backlog)
         await self._maybe_summarize(fenced)
         async with self.sv.db.tx() as s:
             await fenced.finish(s, "COMPLETED")
@@ -209,18 +372,21 @@ class MemoryPipeline:
 
     async def _apply_report(self, s: AsyncSession, job: ClaimedJob, scope: dict[str, Any], turn: TurnText,
                             sent_at: datetime, character_rev: int, report) -> list[tuple[str, str]]:
+        # Dedupe against every memory that is still valid and not in conflict, whatever revision it was
+        # checked under: a late extraction of an old-revision turn must not duplicate a checked memory.
         existing_rows = (
             await s.execute(
                 text(
                     "SELECT id, type, subject, predicate, value FROM memory m WHERE tenant_id=:t AND owner_id=:o "
-                    f"AND conversation_id=:c AND epoch=:e AND valid_to IS NULL AND {CHARACTER_REVISION_FILTER}"
+                    "AND conversation_id=:c AND epoch=:e AND valid_to IS NULL AND conflicts_with_revision IS NULL"
                 ),
-                {**scope, "cr": character_rev},
+                scope,
             )
         ).all()
         existing = [ExistingMemory(*r) for r in existing_rows]
         inserted: list[tuple[str, str]] = []
-        for d in reduce(report.memories, existing):
+        needs_check = False
+        for d in reduce(report.memories, existing, self.cfg.tuning.memory.max_new_per_turn):
             if d.action != "INSERT":
                 continue
             m = d.memory
@@ -235,17 +401,18 @@ class MemoryPipeline:
                     """
                     INSERT INTO memory (id, tenant_id, owner_id, conversation_id, epoch, type, subject, predicate, value,
                         time_expr, resolved_at, time_uncertainty, is_fiction, importance, source_msg_ids, source_turn_seq,
-                        evidence, supersedes_id, extractor_version, index_status, created_at)
+                        evidence, supersedes_id, extractor_version, index_status, checked_character_rev, created_at)
                     VALUES (:id, :t, :o, :c, :e, :type, :subj, :pred, :val, :texpr, :rat, :tunc, :fic, :imp,
-                        CAST(:src AS jsonb), :ts, :ev, :sup, :xv, 'PENDING', :created)
+                        CAST(:src AS jsonb), :ts, :ev, :sup, :xv, 'PENDING', :cr, :created)
                     """
                 ),
                 {**scope, "id": mid, "type": m.type.value, "subj": m.subject, "pred": m.predicate, "val": m.value,
                  "texpr": m.time_expression, "rat": m.resolved_at, "tunc": m.time_uncertainty, "fic": m.is_fiction,
                  "imp": m.importance, "src": _j(m.source_message_ids), "ts": job.turn_seq, "ev": m.evidence,
-                 "sup": d.supersedes_id, "xv": EXTRACTOR_VERSION, "created": sent_at},
+                 "sup": d.supersedes_id, "xv": EXTRACTOR_VERSION, "cr": character_rev, "created": sent_at},
             )
             inserted.append((mid, f"{m.predicate} {m.value} {m.evidence}"))
+            needs_check = needs_check or m.subject != "user"
             if m.opens_unfinished_event and not m.is_fiction and m.type in (
                 MemoryType.SCHEDULE, MemoryType.UNFINISHED, MemoryType.SHARED_EVENT
             ):
@@ -272,6 +439,19 @@ class MemoryPipeline:
             resolved_shared = resolved_shared or (res.rowcount > 0 and r.outcome == "RESOLVED")  # type: ignore[attr-defined]
 
         await self._apply_relationship(s, job, scope, sent_at, report, resolved_shared)
+        if needs_check:
+            # The turn was said under an older card than the conversation has now (extraction lag):
+            # check the new character/shared memories against the current card.
+            # FOR SHARE: wait for an in-flight revision change, so either we see the new revision here or
+            # its REVISION job sees these rows.
+            current_rev = await s.scalar(text(
+                "SELECT character_rev FROM ai_conversation WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e "
+                "FOR SHARE"
+            ), scope)
+            if current_rev is not None and current_rev > character_rev:
+                await enqueue_job(s, "REVISION", job.tenant_id, job.owner_id, job.conversation_id, job.epoch,
+                                  job.turn_seq, revision_attempt_id(job.conversation_id, job.epoch, current_rev, f"t{job.turn_seq}"),
+                                  {"characterRevision": current_rev})
         return inserted
 
     async def _apply_relationship(self, s: AsyncSession, job: ClaimedJob, scope: dict[str, Any], sent_at: datetime,
@@ -322,6 +502,7 @@ class MemoryPipeline:
             state, proposals,
             ReduceContext(day=day, open_conflict=last_kind == "CONFLICT", resolved_shared_event=resolved_shared,
                           existing_keys=frozenset(keys)),
+            self.cfg.tuning.relationship,
         )
         for ev in applied:
             await s.execute(
@@ -370,9 +551,8 @@ class MemoryPipeline:
         except ProviderError:
             async with self.sv.db.tx() as s:
                 await fenced.guard(s)
-                await s.execute(
-                    text("UPDATE memory SET index_status='FAILED' WHERE id = ANY(:ids)"), {"ids": [i for i, _ in items]}
-                )
+                await s.execute(text(MARK_FAILED_SQL),
+                                {"ids": [i for i, _ in items], "ev": self.cfg.embedding_model})
             # Not a job failure: extraction is already committed. The next memory job of this
             # conversation retries these rows (see _reindex_backlog).
             return
@@ -381,8 +561,8 @@ class MemoryPipeline:
             for (mid, _), vec in zip(items, vectors, strict=True):
                 await s.execute(
                     text(
-                        "UPDATE memory SET embedding = CAST(:v AS vector), embedding_version = :ver, index_status='INDEXED' "
-                        "WHERE id = :id"
+                        "UPDATE memory SET embedding = CAST(:v AS vector), embedding_version = :ver, index_status='INDEXED', "
+                        "index_attempts = 0, index_retry_at = NULL WHERE id = :id"
                     ),
                     {"v": json.dumps(vec), "ver": self.cfg.embedding_model, "id": mid},
                 )
@@ -390,16 +570,18 @@ class MemoryPipeline:
             await self._advance_watermark(s, job, embedding=True)
 
     async def _reindex_backlog(self, fenced: FencedJob, skip: set[str]) -> list[tuple[str, str]]:
-        """Earlier memories of this conversation whose embedding failed or never ran."""
+        """Earlier memories of this conversation whose embedding failed, never ran, or was made by a
+        different embedding model than the configured one (model change, see memory/reindex.py)."""
         job = fenced.job
         async with self.sv.db.session() as s:
             rows = (await s.execute(text(
-                "SELECT id, concat_ws(' ', predicate, value, evidence) FROM memory "
-                "WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c AND epoch=:e "
-                "AND valid_to IS NULL AND index_status <> 'INDEXED' AND source_turn_seq < :ts "
-                "ORDER BY created_at LIMIT :n"
+                f"SELECT m.id, {EMBED_TEXT} FROM memory m "
+                "WHERE m.tenant_id=:t AND m.owner_id=:o AND m.conversation_id=:c AND m.epoch=:e "
+                f"AND m.valid_to IS NULL AND {STALE} AND {DUE} AND m.source_turn_seq < :ts "
+                f"ORDER BY {DUE_ORDER} LIMIT :n"
             ), {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch,
-                "ts": job.turn_seq, "n": REINDEX_BATCH})).all()
+                "ev": self.cfg.embedding_model, "ts": job.turn_seq,
+                "n": self.cfg.tuning.memory.reindex_batch})).all()
         return [(mid, body) for mid, body in rows if mid not in skip]
 
     async def _maybe_summarize(self, fenced: FencedJob) -> None:
