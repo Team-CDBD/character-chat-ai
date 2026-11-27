@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "evt-CharacterDeleted-1",
+  "tenantId": "tenant-1",
+  "ownerId": "user-7",
+  "aggregateType": "CHARACTER",
+  "aggregateId": "char-9",
+  "aggregateSeq": 1,
+  "occurredAt": "2026-11-13T23:10:00Z",
+  "type": "CharacterDeleted",
+  "payload": {
+    "characterId": "char-9",
+    "conversationIds": [
+      "conv-3"
+    ]
+  }
+}

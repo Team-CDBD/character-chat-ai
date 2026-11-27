@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "evt-ConversationReset-4",
+  "tenantId": "tenant-1",
+  "ownerId": "user-7",
+  "aggregateType": "CONVERSATION",
+  "aggregateId": "conv-3",
+  "aggregateSeq": 4,
+  "occurredAt": "2026-11-13T23:10:00Z",
+  "type": "ConversationReset",
+  "payload": {
+    "conversationId": "conv-3",
+    "oldEpoch": 1,
+    "newEpoch": 2
+  }
+}

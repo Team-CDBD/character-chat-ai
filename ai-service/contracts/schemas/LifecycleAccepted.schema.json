@@ -1,0 +1,14 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "receiptId": {
+      "title": "Receiptid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "receiptId"
+  ],
+  "title": "LifecycleAccepted",
+  "type": "object"
+}

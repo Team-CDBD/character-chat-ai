@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "tenantId": "tenant-1",
+  "ownerId": "user-7",
+  "conversationId": "conv-3",
+  "epoch": 1,
+  "turnSeq": 12,
+  "attemptId": "conv-3-e1-t12-a",
+  "responseId": "response-12-a",
+  "mode": "NEW",
+  "requiredLifecycleSeq": 2,
+  "baseCommittedTurnSeq": 11,
+  "characterRevision": 1,
+  "personaRevision": 1,
+  "userMessage": {
+    "id": "u12",
+    "text": "좋은 아침",
+    "sentAt": "2026-11-13T23:10:00Z"
+  },
+  "contextSnapshotId": null,
+  "timezone": "Asia/Seoul",
+  "generationPolicyVersion": "chat-v1",
+  "deadlineAt": "2026-11-13T23:11:30Z",
+  "traceId": "trace-12"
+}

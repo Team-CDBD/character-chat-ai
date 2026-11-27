@@ -1,0 +1,162 @@
+{
+  "$defs": {
+    "ErrorBody": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "title": "ErrorBody",
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "PROVIDER_TIMEOUT",
+        "PROVIDER_ERROR",
+        "POLICY_BLOCKED",
+        "CONTEXT_NOT_READY",
+        "BUDGET_EXCEEDED",
+        "SNAPSHOT_EXPIRED",
+        "REVOKED",
+        "INTERNAL"
+      ],
+      "title": "ErrorCode",
+      "type": "string"
+    },
+    "JobStatus": {
+      "enum": [
+        "ACCEPTED",
+        "WAITING_CONTEXT",
+        "RUNNING",
+        "STREAMING",
+        "COMPLETED",
+        "FAILED",
+        "REVOKED"
+      ],
+      "title": "JobStatus",
+      "type": "string"
+    },
+    "Usage": {
+      "additionalProperties": false,
+      "properties": {
+        "inputTokens": {
+          "default": 0,
+          "title": "Inputtokens",
+          "type": "integer"
+        },
+        "outputTokens": {
+          "default": 0,
+          "title": "Outputtokens",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        }
+      },
+      "title": "Usage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "aiJobId": {
+      "title": "Aijobid",
+      "type": "string"
+    },
+    "attemptId": {
+      "title": "Attemptid",
+      "type": "string"
+    },
+    "responseId": {
+      "title": "Responseid",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/JobStatus"
+    },
+    "text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Text"
+    },
+    "usage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ErrorBody"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "contextSnapshotId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Contextsnapshotid"
+    },
+    "degraded": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Degraded",
+      "type": "array"
+    }
+  },
+  "required": [
+    "aiJobId",
+    "attemptId",
+    "responseId",
+    "status"
+  ],
+  "title": "GenerationResult",
+  "type": "object"
+}

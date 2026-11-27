@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "ErrorCode": {
+      "enum": [
+        "PROVIDER_TIMEOUT",
+        "PROVIDER_ERROR",
+        "POLICY_BLOCKED",
+        "CONTEXT_NOT_READY",
+        "BUDGET_EXCEEDED",
+        "SNAPSHOT_EXPIRED",
+        "REVOKED",
+        "INTERNAL"
+      ],
+      "title": "ErrorCode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/ErrorCode"
+    },
+    "message": {
+      "title": "Message",
+      "type": "string"
+    },
+    "retryable": {
+      "title": "Retryable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "code",
+    "message",
+    "retryable"
+  ],
+  "title": "ErrorBody",
+  "type": "object"
+}

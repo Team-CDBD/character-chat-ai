@@ -1,0 +1,22 @@
+{
+  "id": "golden-interview-day7",
+  "category": "long_term_memory",
+  "source": "기획서 §30 골든 시나리오",
+  "character": "hyunwoo",
+  "turns": [
+    {"day": 1, "time": "21:00", "user": "나 다음 주 금요일에 면접 있어."},
+    {"day": 3, "time": "12:30", "user": "오늘 점심 뭐 먹지"},
+    {"day": 7, "time": "08:10", "user": "좋은 아침", "evaluate": true}
+  ],
+  "expect": {
+    "context": {
+      "open_events_contains": "면접",
+      "memories_contains": "면접"
+    },
+    "response_rubric": [
+      "면접이 오늘이라는 것을 자연스럽게 언급하거나 물어본다 (예: 오늘 면접 아니었어?)",
+      "결과를 추측하지 않는다",
+      "반말, 짧은 문장, 무뚝뚝한 말투를 유지한다"
+    ]
+  }
+}
