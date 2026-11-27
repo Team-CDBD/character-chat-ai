@@ -3,6 +3,8 @@
 캐릭터 챗 MVP의 **AI 서비스** 저장소입니다. 이 문서는 전체 아키텍처를 설명하고, 처음 쓴 「AI 아키텍처와 AI 서버 개발 플랜 v1.0」(이하 *플랜*) 가운데 **실제 코드에 반영되어 확정된 내용**을 정리합니다. 플랜에서 바뀐 점과 아직 열어 둔 것도 따로 적었습니다.
 
 > 실행 방법·디렉터리별 설명은 [`ai-service/README.md`](ai-service/README.md), BE와 주고받는 계약은 [`ai-service/contracts/README.md`](ai-service/contracts/README.md)를 보세요.
+>
+> **구조·플로우 문서 (HTML)**: [`docs/architecture-flow.html`](docs/architecture-flow.html)은 서버별 구성, Mermaid 다이어그램 11종(시퀀스·플로우·상태·ER), 버튼으로 단계를 따라가는 인터랙티브 플로우, Mock 현황과 BE 연동 가이드를 한 파일에 담았습니다. 레포를 받은 뒤 브라우저로 열면 됩니다(다이어그램은 jsDelivr의 mermaid를 불러옵니다). 요약은 [14장](#14-구조플로우-문서와-be-연동-현황)에 있습니다.
 
 ## 목차
 1. [이 서비스가 책임지는 것](#1-이-서비스가-책임지는-것)
@@ -18,6 +20,7 @@
 11. [기술 스택과 배포](#11-기술-스택과-배포)
 12. [플랜 대비 확정·변경·미결 사항](#12-플랜-대비-확정변경미결-사항)
 13. [진행 상황](#13-진행-상황)
+14. [구조·플로우 문서와 BE 연동 현황](#14-구조플로우-문서와-be-연동-현황)
 
 ---
 
@@ -376,3 +379,30 @@ Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevision
 | P7 통합·부하·베타 | ⬜ | 실제 BE 계약 테스트, 부하·장애 주입 시험 |
 
 테스트는 53개(단위 33, 실제 DB 통합 20)이며 CI에서 매 PR마다 실행됩니다. 기획서 §30 골든 시나리오(Day 1 "다음 주 금요일에 면접 있어" → Day 7 재방문 시 "오늘 면접"이 Context에 들어감)도 그중 하나입니다.
+
+## 14. 구조·플로우 문서와 BE 연동 현황
+
+[`docs/architecture-flow.html`](docs/architecture-flow.html) 구성:
+
+| 장 | 내용 |
+|---|---|
+| 1~2 | 전체 구성도, 서버(제품 BE · ai-api · Lifecycle 루프 · 생성 슬롯 · 기억 슬롯 · AI DB · 모델 Provider)별 역할과 담당 코드 |
+| 3 | Mermaid: 대화 시작·한 턴 시퀀스, 생성·기억·Inbox·후보 이후 분기 플로우, 생성·기억 Job 상태, 초기화·삭제 시퀀스 |
+| 4 | 인터랙티브 플로우: 서버별 레인의 버튼을 누르면 처리 순서, 코드 위치, 입출력 JSON, 데이터 정제 예시(입력 → 결과)가 나오고 이어지는 단계만 켜짐 |
+| 5 | Mock 현황: 무엇이 대역이고 무엇으로 바뀌는지, BE 몫인지 AI 몫인지 |
+| 6 | BE 연동 가이드: 이벤트별 발행 시점·순번, 생성 요청 필드의 BE 쪽 출처, 응답·오류 처리, 연동 순서, 합의 필요 가정 |
+| 7 | 데이터 모델 ER 다이어그램과 초기화·삭제 시 처리 |
+
+**BE가 아직 없어서 Mock으로 대신하는 것**
+
+| Mock | 위치 | 실제로 바뀔 것 | 담당 |
+|---|---|---|---|
+| 이벤트·생성 요청 빌더 | `tools/mock_be.py::MockConversation` | BE Outbox 발행기 + 생성 요청 클라이언트 | BE |
+| demo CLI (HTTP+SSE 재생) | `python -m tools.mock_be demo` | BE의 SSE 중계, 후보 저장·선택·확정 | BE |
+| 샘플 캐릭터·Persona·tenant | `mock_be.py` 상수 | BE 원본 데이터 | BE |
+| 서비스 토큰 `local-dev-token` | `AI_SERVICE_TOKENS` | 환경별 비밀값 | BE·AI |
+| 사용자 일일 토큰 한도 | 없음 | BE 원장 | BE |
+| 생성·추출·요약·baseline·임베딩 | `app/providers/mock.py` | 평가로 고른 실제 모델 | AI |
+| 토큰 수 `글자 수 / 1.5` | `providers/base.py` | 공식 토크나이저 | AI |
+
+MockProvider는 추출 스크립트가 없으면 빈 결과를 돌려주므로 demo로는 기억이 쌓이지 않습니다. 기억 경로는 통합 테스트가 스크립트를 넣어 검증합니다.

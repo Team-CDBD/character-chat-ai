@@ -6,6 +6,8 @@
 - 작업 실행: DB Job 테이블 + 자체 Worker 루프 (`FOR UPDATE SKIP LOCKED`, lease, fencing token). Redis·브로커 없음
 - 모델: 아직 미정 → `MockProvider` 로 전 경로가 동작. 실제 공급자는 W2 한국어 평가 후 `app/providers/` 에 추가
 
+서버별 구조, 전체 플로우(Mermaid), 버튼으로 따라가는 인터랙티브 플로우, BE 연동 가이드는 [`../docs/architecture-flow.html`](../docs/architecture-flow.html)에 있습니다.
+
 ## 빠르게 실행하기
 
 ```bash
