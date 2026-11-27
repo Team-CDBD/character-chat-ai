@@ -22,6 +22,17 @@ from app.understanding.normalize import keywords
 W_SEMANTIC, W_KEYWORD, W_IMPORTANCE, W_TIME = 0.55, 0.15, 0.15, 0.15
 
 
+# Persona edits may share a character revision. Only the source character revision
+# governs facts attributed to the character; user and shared memories stay available.
+CHARACTER_REVISION_FILTER = """
+    (m.subject <> 'character' OR EXISTS (
+        SELECT 1 FROM committed_turn source
+        WHERE source.tenant_id=m.tenant_id AND source.conversation_id=m.conversation_id
+          AND source.epoch=m.epoch AND source.turn_seq=m.source_turn_seq AND source.character_rev=:cr
+    ))
+"""
+
+
 @dataclass(frozen=True)
 class Scope:
     tenant_id: str
@@ -72,6 +83,7 @@ async def retrieve(
     now: datetime,
     tz,
     *,
+    character_revision: int,
     top_k: int,
     gate: float,
     exclude_ids: set[str] | None = None,
@@ -79,7 +91,7 @@ async def retrieve(
     degraded: list[str] = []
     params: dict[str, Any] = {
         "t": scope.tenant_id, "o": scope.owner_id, "c": scope.conversation_id, "e": scope.epoch,
-        "ev": embedding_version,
+        "ev": embedding_version, "cr": character_revision,
     }
     sim_sql = "NULL::float"
     if query_embedding is not None:
@@ -96,9 +108,9 @@ async def retrieve(
                 f"""
                 SELECT id, type, predicate, value, evidence, time_expr, resolved_at, is_fiction, importance,
                        created_at, index_status, {sim_sql} AS sim
-                FROM memory
+                FROM memory m
                 WHERE tenant_id = :t AND owner_id = :o AND conversation_id = :c AND epoch = :e
-                  AND valid_to IS NULL AND conflicts_with_revision IS NULL
+                  AND valid_to IS NULL AND conflicts_with_revision IS NULL AND {CHARACTER_REVISION_FILTER}
                 ORDER BY created_at DESC
                 LIMIT 500
                 """

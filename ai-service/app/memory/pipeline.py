@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge import prompts
+from app.knowledge.retriever import CHARACTER_REVISION_FILTER
 from app.memory import prefilter
 from app.memory.reducer import ExistingMemory, reduce
 from app.memory.validator import EXTRACTOR_VERSION, MemoryType, TurnText, parse_extraction, validate
@@ -120,6 +121,22 @@ class MemoryPipeline:
         job = fenced.job
         scope = {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch}
         async with self.sv.db.session() as s:
+            projected = await s.scalar(text(
+                "SELECT memory_through_turn_seq FROM ai_conversation "
+                "WHERE tenant_id=:t AND conversation_id=:c AND epoch=:e"
+            ), scope)
+            resume = projected is not None and projected >= job.turn_seq
+            if resume:
+                pending = (await s.execute(text(
+                    "SELECT id, concat_ws(' ', predicate, value, evidence) FROM memory "
+                    "WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c AND epoch=:e "
+                    "AND source_turn_seq=:ts AND index_status <> 'INDEXED' ORDER BY id"
+                ), {**scope, "ts": job.turn_seq})).all()
+        if resume:
+            await self._finish_memory(fenced, [(mid, body) for mid, body in pending])
+            return
+
+        async with self.sv.db.session() as s:
             turn_row = (
                 await s.execute(
                     text(
@@ -162,14 +179,17 @@ class MemoryPipeline:
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             if report is not None:
-                new_memory_ids = await self._apply_report(s, job, scope, turn, turn_row["sent_at"], report)
+                new_memory_ids = await self._apply_report(s, job, scope, turn, turn_row["sent_at"], turn_row["character_rev"], report)
             if usage is not None:
                 await self._ledger(s, job, "extract", usage)
             await self._advance_watermark(s, job, embedding=not new_memory_ids)
             await fenced.guard(s)
 
-        if new_memory_ids:
-            await self._embed(fenced, new_memory_ids)
+        await self._finish_memory(fenced, new_memory_ids)
+
+    async def _finish_memory(self, fenced: FencedJob, pending: list[tuple[str, str]]) -> None:
+        if pending:
+            await self._embed(fenced, pending)
         await self._maybe_summarize(fenced)
         async with self.sv.db.tx() as s:
             await fenced.finish(s, "COMPLETED")
@@ -186,14 +206,14 @@ class MemoryPipeline:
         return [PromptMessage("system", prompts.load("extract-v1")), PromptMessage("user", body)]
 
     async def _apply_report(self, s: AsyncSession, job: ClaimedJob, scope: dict[str, Any], turn: TurnText,
-                            sent_at: datetime, report) -> list[tuple[str, str]]:
+                            sent_at: datetime, character_rev: int, report) -> list[tuple[str, str]]:
         existing_rows = (
             await s.execute(
                 text(
-                    "SELECT id, type, subject, predicate, value FROM memory WHERE tenant_id=:t AND owner_id=:o "
-                    "AND conversation_id=:c AND epoch=:e AND valid_to IS NULL"
+                    "SELECT id, type, subject, predicate, value FROM memory m WHERE tenant_id=:t AND owner_id=:o "
+                    f"AND conversation_id=:c AND epoch=:e AND valid_to IS NULL AND {CHARACTER_REVISION_FILTER}"
                 ),
-                scope,
+                {**scope, "cr": character_rev},
             )
         ).all()
         existing = [ExistingMemory(*r) for r in existing_rows]
@@ -350,7 +370,7 @@ class MemoryPipeline:
                 await s.execute(
                     text("UPDATE memory SET index_status='FAILED' WHERE id = ANY(:ids)"), {"ids": [i for i, _ in items]}
                 )
-            return
+            raise
         async with self.sv.db.tx() as s:
             await fenced.guard(s)
             for (mid, _), vec in zip(items, vectors, strict=True):

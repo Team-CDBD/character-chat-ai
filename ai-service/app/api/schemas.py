@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 SCHEMA_VERSION = "1.0"
@@ -128,6 +128,12 @@ class GenerationRequest(ContractModel):
     generation_policy_version: str = "chat-v1"
     deadline_at: datetime
     trace_id: str | None = None
+
+    @model_validator(mode="after")
+    def check_new_context(self):
+        if self.mode == GenerationMode.NEW and self.context_snapshot_id is not None:
+            raise ValueError("NEW must build a fresh context")
+        return self
 
 
 class GenerationAccepted(ContractModel):

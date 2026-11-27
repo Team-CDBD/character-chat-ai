@@ -201,3 +201,73 @@ async def test_character_deleted_purges_and_blocks(client, services, mock):
     await post(client, again.opened())
     await drain(services)
     assert await rows(services, "SELECT 1 FROM ai_conversation") == []
+
+
+async def test_crash_after_projection_resumes_before_next_turn(client, services, mock, monkeypatch):
+    import asyncio
+
+    import pytest
+
+    from app.memory.pipeline import MemoryPipeline
+    from app.persistence.jobs import claim
+
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await drain(services)
+    mock.json_scripts["extract-v1"] = scripted_extractor
+    await post(client, conv.committed(1, "나 다음 주 금요일에 면접 있어", "응", DAY1))
+    await post(client, conv.committed(2, "응", "응", DAY1))
+    await drain(services, memory=False)
+    pipeline = MemoryPipeline(services)
+    job = await claim(services.db, "MEMORY", "old-worker", 30)
+
+    async def interrupted(*args):
+        raise asyncio.CancelledError
+
+    with monkeypatch.context() as m:
+        m.setattr(pipeline, "_embed", interrupted)
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline.run(job)
+    assert await claim(services.db, "MEMORY", "other-worker", 30) is None
+    async with services.db.tx() as s:
+        await s.execute(text("UPDATE ai_job SET lease_until=now() - interval '1 second' WHERE id=:id"), {"id": job.id})
+    await drain(services)
+    assert await rows(services, "SELECT index_status FROM memory") == [("INDEXED",)]
+    assert await rows(services, "SELECT run_count, status FROM ai_job WHERE kind='MEMORY' ORDER BY turn_seq") == [
+        (2, "COMPLETED"), (1, "COMPLETED")
+    ]
+    assert await rows(services, "SELECT count(*) FROM usage_ledger WHERE purpose='extract'") == [(1,)]
+
+
+async def test_delete_scrubs_queued_and_late_inbox_bodies(client, services):
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await drain(services)
+    ev = conv.committed(1, "비공개 대화", "답변", DAY1)
+    ev["aggregateSeq"] = 10
+    await post(client, ev)
+    await post(client, conv.character_deleted())
+    await drain(services)
+    await post(client, conv.committed(2, "늦은 원문", "응", DAY1))
+    assert await rows(services, "SELECT count(*) FROM event_inbox WHERE payload <> '{}'::jsonb") == [(0,)]
+
+
+async def test_revision_filters_character_memory_even_when_extraction_lags(client, services, mock):
+    conv = MockConversation()
+    await post(client, conv.opened())
+    await post(client, conv.committed(1, "나는 고양이를 키워", "나는 대학생이야", DAY1))
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    mock.json_scripts["extract-v1"] = lambda _: {"memories": [
+        {"type": "SHARED_EVENT", "subject": "character", "predicate": "직업", "value": "대학생",
+         "sourceMessageIds": ["a1"], "evidence": "대학생이야"},
+        {"type": "USER_FACT", "subject": "user", "predicate": "반려동물", "value": "고양이",
+         "sourceMessageIds": ["u1"], "evidence": "고양이를 키워"},
+    ]}
+    await drain(services)
+    assert await rows(services, "SELECT count(*) FROM memory") == [(2,)]
+    services.settings.retrieval_gate = 0
+    job = (await client.post(f"{API}/generations", json=conv.generation(2, "기억나?", DAY1))).json()["aiJobId"]
+    await drain(services)
+    assert (await client.get(f"{API}/generations/{job}")).json()["status"] == "COMPLETED"
+    memories = mock.chat_calls[-1][1].content
+    assert "반려동물: 고양이" in memories and "직업: 대학생" not in memories
