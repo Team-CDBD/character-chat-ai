@@ -125,6 +125,7 @@ class MemoryTuning(_T):
     prefilter_min_chars: int = Field(12, ge=0)  # free-form lines shorter than this skip extraction
     max_runs: int = Field(3, ge=1)  # provider retries before a memory job gives up
     reindex_batch: int = Field(16, ge=0)  # stale/failed embeddings retried per memory job
+    revision_check_batch: int = Field(40, ge=1)  # memories judged per call after a character edit
 
 
 class Tuning(_T):

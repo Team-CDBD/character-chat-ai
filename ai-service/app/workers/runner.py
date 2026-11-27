@@ -59,7 +59,7 @@ class WorkerRunner:
 
     async def memory_slot(self, slot: int) -> None:
         owner = f"{self.worker_id}:mem{slot}"
-        kinds = ("MEMORY", "BASELINE")
+        kinds = ("MEMORY", "REVISION", "BASELINE")
         while not self._stop.is_set():
             job = None
             for kind in kinds:

@@ -468,7 +468,14 @@ async def apply_revision_changed(
         text("UPDATE ai_conversation SET character_rev = :cr, persona_rev = :pr WHERE id = :id"),
         {"cr": p.character_revision, "pr": p.persona_revision, "id": conv["id"]},
     )
-    # Retrieval checks the source turn revision even when extraction completes after this edit.
+    if p.character_revision > conv["character_rev"]:
+        # Hide only the character/shared memories that conflict with the new card (see the revision check
+        # in memory/pipeline.py). Until it finishes, unchecked character facts stay hidden.
+        await enqueue_job(
+            s, "REVISION", tenant, owner, p.conversation_id, p.epoch, 0,
+            f"revision:{p.conversation_id}:{p.epoch}:{p.character_revision}",
+            {"characterRevision": p.character_revision},
+        )
 
 
 async def apply_conversation_reset(

@@ -263,8 +263,14 @@ async def test_revision_filters_character_memory_even_when_extraction_lags(clien
         {"type": "USER_FACT", "subject": "user", "predicate": "반려동물", "value": "고양이",
          "sourceMessageIds": ["u1"], "evidence": "고양이를 키워"},
     ]}
+    mock.json_scripts["revision-check-v1"] = lambda msgs: {"conflicts": [
+        {"id": line.split("id=")[1].split(":")[0], "reason": "직업 변경"}
+        for line in msgs[-1].content.splitlines() if line.startswith("- id=") and "대학생" in line
+    ]}
     await drain(services)
     assert await rows(services, "SELECT count(*) FROM memory") == [(2,)]
+    assert await rows(services, "SELECT predicate, conflicts_with_revision FROM memory WHERE subject='character'") == [
+        ("직업", 2)]
     services.settings.retrieval_gate = 0
     job = (await client.post(f"{API}/generations", json=conv.generation(2, "기억나?", DAY1))).json()["aiJobId"]
     await drain(services)
@@ -337,3 +343,70 @@ async def test_character_promise_survives_character_edit(client, services, mock)
     assert (await client.get(f"{API}/generations/{job}")).json()["status"] == "COMPLETED"
     system_variable = mock.chat_calls[-1][1].content
     assert "<open_events>" in system_variable and "노래 들려주기" in system_variable.split("<open_events>")[1]
+
+
+def _character_memories_script(_):
+    return {"memories": [
+        {"type": "SHARED_EVENT", "subject": "character", "predicate": "직업", "value": "대학생",
+         "sourceMessageIds": ["a1"], "evidence": "나는 대학생이야"},
+        {"type": "SHARED_EVENT", "subject": "character", "predicate": "좋아하는 음식", "value": "라면",
+         "sourceMessageIds": ["a1"], "evidence": "라면을 제일 좋아해"},
+        {"type": "SHARED_EVENT", "subject": "shared", "predicate": "함께한 일", "value": "한강 산책",
+         "sourceMessageIds": ["a1"], "evidence": "한강 산책 또 가자"},
+    ]}
+
+
+async def _memories_in_prompt(client, services, mock, conv, turn):
+    services.settings.retrieval_gate = 0
+    job = (await client.post(f"{API}/generations", json=conv.generation(turn, "기억나?", DAY1))).json()["aiJobId"]
+    await drain(services)
+    assert (await client.get(f"{API}/generations/{job}")).json()["status"] == "COMPLETED"
+    return mock.chat_calls[-1][1].content
+
+
+async def test_character_edit_hides_only_conflicting_memories(client, services, mock):
+    conv = MockConversation()
+    await post(client, conv.opened())
+    mock.json_scripts["extract-v1"] = _character_memories_script
+    await post(client, conv.committed(1, "너 요즘 학교 다니면서 뭐 해?", "나는 대학생이야. 라면을 제일 좋아해. 한강 산책 또 가자", DAY1))
+    await drain(services)
+    seen: list[str] = []
+
+    def judge(msgs):
+        seen.append(msgs[-1].content)
+        return {"conflicts": [{"id": line.split("id=")[1].split(":")[0], "reason": "직업 변경"}
+                              for line in msgs[-1].content.splitlines() if "대학생" in line and line.startswith("- id=")]
+                + [{"id": "not-a-memory-id", "reason": "invented"}]}
+
+    mock.json_scripts["revision-check-v1"] = judge
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert len(seen) == 1 and "배경:" in seen[0] and "-> 직장인" in seen[0]
+    assert "id=" in seen[0] and "한강 산책" in seen[0]  # shared memories are checked too
+    memories = await _memories_in_prompt(client, services, mock, conv, 2)
+    assert "좋아하는 음식: 라면" in memories and "함께한 일: 한강 산책" in memories
+    assert "직업: 대학생" not in memories
+    assert await rows(services, "SELECT predicate, checked_character_rev, conflicts_with_revision FROM memory "
+                                "ORDER BY predicate") == [("좋아하는 음식", 2, None), ("직업", 1, 2), ("함께한 일", 2, None)]
+    assert await rows(services, "SELECT count(*) FROM usage_ledger WHERE purpose='revision'") == [(1,)]
+
+
+async def test_failed_revision_check_keeps_character_facts_hidden(client, services, mock):
+    from app.providers.base import ProviderError
+
+    conv = MockConversation()
+    await post(client, conv.opened())
+    mock.json_scripts["extract-v1"] = _character_memories_script
+    await post(client, conv.committed(1, "너 요즘 학교 다니면서 뭐 해?", "나는 대학생이야. 라면을 제일 좋아해. 한강 산책 또 가자", DAY1))
+    await drain(services)
+
+    def down(_):
+        raise ProviderError("model down")
+
+    mock.json_scripts["revision-check-v1"] = down
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert await rows(services, "SELECT status, run_count FROM ai_job WHERE kind='REVISION'") == [("FAILED", 3)]
+    memories = await _memories_in_prompt(client, services, mock, conv, 2)
+    assert "함께한 일: 한강 산책" in memories  # shared stays visible
+    assert "라면" not in memories and "대학생" not in memories  # unchecked character facts: fail closed

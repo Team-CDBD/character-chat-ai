@@ -24,15 +24,14 @@ _D = DEFAULT_TUNING.retrieval
 W_SEMANTIC, W_KEYWORD, W_IMPORTANCE, W_TIME = _D.w_semantic, _D.w_keyword, _D.w_importance, _D.w_time
 
 
-# Facts attributed to the character are only trusted under the character revision they were said in;
-# user and shared memories stay available. The validator normalizes ``subject`` to user/character/shared,
-# and anything else is treated as character-sourced (fail closed).
+# User memories never depend on the character card. Character and shared memories are usable once
+# they were checked against the current character revision (the revision they were said in counts):
+# after an edit the revision-check job compares them with the new card, hides only the conflicting
+# ones (``conflicts_with_revision``) and bumps ``checked_character_rev`` on the rest. Character facts
+# waiting for that check are hidden (fail closed); shared memories stay visible while they wait.
 CHARACTER_REVISION_FILTER = """
-    (m.subject IN ('user', 'shared') OR EXISTS (
-        SELECT 1 FROM committed_turn source
-        WHERE source.tenant_id=m.tenant_id AND source.conversation_id=m.conversation_id
-          AND source.epoch=m.epoch AND source.turn_seq=m.source_turn_seq AND source.character_rev=:cr
-    ))
+    m.conflicts_with_revision IS NULL
+    AND (m.subject IN ('user', 'shared') OR m.checked_character_rev = :cr)
 """
 
 
@@ -117,7 +116,7 @@ async def retrieve(
                        created_at, index_status, {sim_sql} AS sim
                 FROM memory m
                 WHERE tenant_id = :t AND owner_id = :o AND conversation_id = :c AND epoch = :e
-                  AND valid_to IS NULL AND conflicts_with_revision IS NULL AND {CHARACTER_REVISION_FILTER}
+                  AND valid_to IS NULL AND {CHARACTER_REVISION_FILTER}
                 ORDER BY created_at DESC
                 LIMIT :limit
                 """

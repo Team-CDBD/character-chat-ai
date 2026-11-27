@@ -167,7 +167,8 @@ class Memory(ScopedMixin, TimestampMixin, Base):
     evidence: Mapped[str] = mapped_column(Text)
     supersedes_id: Mapped[str | None] = mapped_column(String(36))
     valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    conflicts_with_revision: Mapped[int | None] = mapped_column(Integer)
+    conflicts_with_revision: Mapped[int | None] = mapped_column(Integer)  # set by the revision check
+    checked_character_rev: Mapped[int | None] = mapped_column(Integer)  # latest revision found compatible
     extractor_version: Mapped[str] = mapped_column(String(32))
     embedding = mapped_column(Vector(), nullable=True)
     embedding_version: Mapped[str | None] = mapped_column(String(64))
@@ -306,7 +307,7 @@ class UsageLedger(TimestampMixin, Base):
     owner_id: Mapped[str] = mapped_column(String(64))
     conversation_id: Mapped[str] = mapped_column(String(64))
     attempt_id: Mapped[str] = mapped_column(String(64))
-    purpose: Mapped[str] = mapped_column(String(16))  # gen | extract | summary | embed | baseline
+    purpose: Mapped[str] = mapped_column(String(16))  # gen | extract | summary | embed | baseline | revision
     model: Mapped[str] = mapped_column(String(64))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
