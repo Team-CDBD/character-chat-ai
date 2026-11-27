@@ -91,3 +91,20 @@ infra/              docker-compose (로컬)
 2. `CharacterRevisionChanged` 는 대화 단위로 발행하고 캐릭터 카드·Persona 전체 사본을 담습니다 (Persona 변경도 같은 이벤트).
 3. 첫 장면은 `ConversationOpened.openingScene` 으로 받아 AI가 Turn 0으로 기록합니다. 초기화 시 BE는 `ConversationReset(oldEpoch, newEpoch)` 만 보내면 AI가 기존 설정·첫 장면으로 새 epoch를 엽니다.
 4. 오류 코드와 `retryable` 힌트는 `contracts/README.md` 표를 따릅니다. 최종 Retry 판단은 BE.
+
+## OpenAI로 실행
+
+기본 공급자는 mock이다. OpenAI를 사용할 때는 아래 환경변수와
+`AI_OPENAI_API_KEY`를 실행 환경의 비밀 설정에 지정한다.
+채팅·추출 모델은 Chat Completions 스트리밍, temperature 및 JSON 객체 출력을 지원해야 한다.
+
+```sh
+export AI_PROVIDER=openai
+export AI_CHAT_MODEL=gpt-4o-mini
+export AI_EXTRACT_MODEL=gpt-4o-mini
+export AI_EMBEDDING_MODEL=text-embedding-3-small
+docker compose -f infra/docker-compose.yml up --build
+```
+
+실제 대화와 기억 추출 입력은 설정한 제공자에게 전송되고 API 요금이 발생한다.
+생성 사용량은 공급자가 보고한 값을 우선하며 누락 시 기존 토큰 추정치를 사용한다.
