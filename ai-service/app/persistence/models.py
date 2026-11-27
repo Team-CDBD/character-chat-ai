@@ -173,6 +173,8 @@ class Memory(ScopedMixin, TimestampMixin, Base):
     embedding = mapped_column(Vector(), nullable=True)
     embedding_version: Mapped[str | None] = mapped_column(String(64))
     index_status: Mapped[str] = mapped_column(String(16), default="PENDING")  # PENDING | INDEXED | FAILED
+    index_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # failed embeddings
+    index_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # backoff after a failure
 
 
 class UnfinishedEvent(ScopedMixin, TimestampMixin, Base):

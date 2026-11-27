@@ -316,12 +316,19 @@ async def test_embedding_outage_completes_job_and_reindexes_later(client, servic
     await post(client, conv.committed(1, "나 다음 주 금요일에 면접 있어", "응", DAY1))
     await drain(services)
     assert await rows(services, "SELECT run_count, status FROM ai_job WHERE kind='MEMORY'") == [(1, "COMPLETED")]
-    assert await rows(services, "SELECT index_status FROM memory") == [("FAILED",)]
+    assert await rows(services, "SELECT index_status, index_attempts, index_retry_at > now() FROM memory") == [
+        ("FAILED", 1, True)]
 
     mock.embed = real_embed
     await post(client, conv.committed(2, "응", "응", DAY1))
     await drain(services)
-    assert await rows(services, "SELECT index_status FROM memory") == [("INDEXED",)]
+    assert await rows(services, "SELECT index_status FROM memory") == [("FAILED",)]  # still backing off
+    async with services.db.tx() as s:
+        await s.execute(text("UPDATE memory SET index_retry_at = now() - interval '1 second'"))
+    await post(client, conv.committed(3, "응", "응", DAY1))
+    await drain(services)
+    assert await rows(services, "SELECT index_status, index_attempts, index_retry_at FROM memory") == [
+        ("INDEXED", 0, None)]
 
 
 async def test_character_promise_survives_character_edit(client, services, mock):
@@ -645,3 +652,80 @@ def test_revision_attempt_ids_fit_the_column():
     assert revision_attempt_id("conv-1", 1, 2) == "revision:conv-1:1:2"
     long = revision_attempt_id("c" * 64, 12, 345, "t999")
     assert len(long) <= 64 and long == revision_attempt_id("c" * 64, 12, 345, "t999")
+
+
+async def test_rows_that_keep_failing_back_off_and_do_not_block_others(client, services, mock):
+    from app.memory.reindex import reindex_all
+    from app.providers.base import ProviderError
+
+    await _conversation_with_character_facts(client, services, mock)  # 3 memories, oldest first
+    order = [r[0] for r in await rows(services, "SELECT predicate FROM memory ORDER BY created_at, id")]
+    real_embed = mock.embed
+    down = {"on": True}
+
+    async def flaky(texts, model):
+        if down["on"]:
+            raise ProviderError("down")
+        return await real_embed(texts, model)
+
+    mock.embed = flaky
+    first = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
+    assert first.embedded == 0 and first.failed == 3
+    assert await rows(services, "SELECT count(*) FROM memory WHERE index_retry_at > now()") == [(3,)]
+    # Nothing is due yet: the sweep does not hammer the same rows again.
+    again = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=10)
+    assert (again.embedded, again.failed) == (0, 0)
+    # Make the newest row due first: retry order follows the schedule, not creation time.
+    async with services.db.tx() as s:
+        await s.execute(text("UPDATE memory SET index_retry_at = now() - interval '1 minute' WHERE predicate = :p"),
+                        {"p": order[-1]})
+    down["on"] = False
+    third = await reindex_all(services.db, services.provider, "mock-embed-v2", batch=1, max_batches=1)
+    assert third.embedded == 1
+    assert await rows(services, "SELECT predicate FROM memory WHERE embedding_version = 'mock-embed-v2'") == [
+        (order[-1],)]
+    # A second failure doubles the wait.
+    down["on"] = True
+    async with services.db.tx() as s:
+        await s.execute(text("UPDATE memory SET index_retry_at = now() - interval '1 second' WHERE predicate = :p"),
+                        {"p": order[0]})
+    await reindex_all(services.db, services.provider, "mock-embed-v2", batch=1, max_batches=1)
+    assert await rows(services, "SELECT index_attempts, index_retry_at - now() > interval '100 seconds' FROM memory "
+                                "WHERE predicate = :p", p=order[0]) == [(2, True)]
+
+
+async def test_late_failure_does_not_overwrite_an_indexed_row(client, services, mock):
+    from app.memory.reindex import MARK_FAILED_SQL
+
+    await _conversation_with_character_facts(client, services, mock)
+    ids = [r[0] for r in await rows(services, "SELECT id FROM memory")]
+    async with services.db.tx() as s:  # e.g. the sweep failed on rows a memory job already re-embedded
+        await s.execute(text(MARK_FAILED_SQL), {"ids": ids, "ev": "mock-embed"})
+    assert await rows(services, "SELECT DISTINCT index_status, index_attempts FROM memory") == [("INDEXED", 0)]
+    async with services.db.tx() as s:  # still stale for the new model: this failure is recorded
+        await s.execute(text(MARK_FAILED_SQL), {"ids": ids, "ev": "mock-embed-v2"})
+    assert await rows(services, "SELECT DISTINCT index_status, index_attempts FROM memory") == [("FAILED", 1)]
+
+
+async def test_malformed_revision_answer_retries_instead_of_unhiding(client, services, mock):
+    conv = await _conversation_with_character_facts(client, services, mock)
+    mock.json_scripts["revision-check-v1"] = _judge_job_conflicts
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인"}))
+    await drain(services)
+    assert await rows(services, "SELECT conflicts_with_revision FROM memory WHERE predicate='직업'") == [(2,)]
+    answers = iter([{}, {"conflicts": "oops"}])
+    mock.json_scripts["revision-check-v1"] = lambda m: (lambda a: _judge_job_conflicts(m) if a == "ok" else a)(
+        next(answers, "ok"))
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인", "speechStyle": "존댓말"}))
+    await drain(services)
+    # Two malformed answers were retried; the job only succeeded on the third (well-formed) answer.
+    assert await rows(services, "SELECT run_count, status FROM ai_job WHERE kind='REVISION' "
+                                "AND payload->>'characterRevision' = '3'") == [(3, "COMPLETED")]
+    mock.json_scripts["revision-check-v1"] = lambda _: {}
+    await post(client, conv.revision_changed(HYUNWOO | {"background": "직장인", "speechStyle": "반말"}))
+    await drain(services)
+    assert await rows(services, "SELECT status FROM ai_job WHERE kind='REVISION' "
+                                "AND payload->>'characterRevision' = '4'") == [("FAILED",)]
+    assert await rows(services, "SELECT checked_character_rev FROM memory WHERE predicate='라면' "
+                                "OR predicate='좋아하는 음식'") == [(3,)]  # not marked compatible with rev 4
+    assert "라면" not in await _memories_in_prompt(client, services, mock, conv, 2)

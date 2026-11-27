@@ -23,7 +23,7 @@ from app.knowledge.context_builder import CHARACTER_FIELDS, render_character
 from app.lifecycle.handler import enqueue_job, revision_attempt_id
 from app.memory import prefilter
 from app.memory.reducer import ExistingMemory, reduce
-from app.memory.reindex import EMBED_TEXT, STALE
+from app.memory.reindex import DUE, DUE_ORDER, EMBED_TEXT, MARK_FAILED_SQL, STALE
 from app.memory.validator import EXTRACTOR_VERSION, MemoryType, TurnText, parse_extraction, validate
 from app.persistence.jobs import ClaimedJob, FencedJob, LeaseLost
 from app.persistence.models import new_id
@@ -66,12 +66,21 @@ def changed_fields(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str,
 
 
 def parse_conflicts(result: dict[str, Any], allowed: set[str]) -> set[str]:
-    """Only ids we sent are accepted; anything else from the model is ignored."""
+    """Conflicting ids from the model's answer. Only ids we sent are accepted.
+
+    A malformed answer (no ``conflicts`` list, an entry without a string id) raises ProviderError so the
+    job retries: treating it as "no conflicts" would mark every memory in the batch compatible and could
+    even bring back memories hidden by an earlier check. Well-formed ids we did not send are ignored.
+    """
     items = result.get("conflicts") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        raise ProviderError("revision-check answer has no conflicts list")
     out: set[str] = set()
-    for item in items if isinstance(items, list) else []:
+    for item in items:
         mid = item.get("id") if isinstance(item, dict) else item
-        if isinstance(mid, str) and mid in allowed:
+        if not isinstance(mid, str):
+            raise ProviderError("revision-check answer has an entry without an id")
+        if mid in allowed:
             out.add(mid)
     return out
 
@@ -542,9 +551,8 @@ class MemoryPipeline:
         except ProviderError:
             async with self.sv.db.tx() as s:
                 await fenced.guard(s)
-                await s.execute(
-                    text("UPDATE memory SET index_status='FAILED' WHERE id = ANY(:ids)"), {"ids": [i for i, _ in items]}
-                )
+                await s.execute(text(MARK_FAILED_SQL),
+                                {"ids": [i for i, _ in items], "ev": self.cfg.embedding_model})
             # Not a job failure: extraction is already committed. The next memory job of this
             # conversation retries these rows (see _reindex_backlog).
             return
@@ -553,8 +561,8 @@ class MemoryPipeline:
             for (mid, _), vec in zip(items, vectors, strict=True):
                 await s.execute(
                     text(
-                        "UPDATE memory SET embedding = CAST(:v AS vector), embedding_version = :ver, index_status='INDEXED' "
-                        "WHERE id = :id"
+                        "UPDATE memory SET embedding = CAST(:v AS vector), embedding_version = :ver, index_status='INDEXED', "
+                        "index_attempts = 0, index_retry_at = NULL WHERE id = :id"
                     ),
                     {"v": json.dumps(vec), "ver": self.cfg.embedding_model, "id": mid},
                 )
@@ -569,8 +577,8 @@ class MemoryPipeline:
             rows = (await s.execute(text(
                 f"SELECT m.id, {EMBED_TEXT} FROM memory m "
                 "WHERE m.tenant_id=:t AND m.owner_id=:o AND m.conversation_id=:c AND m.epoch=:e "
-                f"AND m.valid_to IS NULL AND {STALE} AND m.source_turn_seq < :ts "
-                "ORDER BY (m.index_status = 'FAILED'), m.created_at LIMIT :n"
+                f"AND m.valid_to IS NULL AND {STALE} AND {DUE} AND m.source_turn_seq < :ts "
+                f"ORDER BY {DUE_ORDER} LIMIT :n"
             ), {"t": job.tenant_id, "o": job.owner_id, "c": job.conversation_id, "e": job.epoch,
                 "ev": self.cfg.embedding_model, "ts": job.turn_seq,
                 "n": self.cfg.tuning.memory.reindex_batch})).all()

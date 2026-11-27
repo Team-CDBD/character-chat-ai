@@ -36,6 +36,22 @@ from app.providers.base import ProviderAdapter, ProviderError
 log = logging.getLogger(__name__)
 
 STALE = "(m.index_status <> 'INDEXED' OR m.embedding_version IS DISTINCT FROM :ev)"
+# Stale rows whose backoff has passed (or that never failed). Never-failed rows come first, then failed
+# rows by their retry time, so a row that keeps failing moves further back each time.
+DUE = "(m.index_retry_at IS NULL OR m.index_retry_at <= now())"
+DUE_ORDER = "m.index_retry_at NULLS FIRST, m.created_at"
+BACKOFF_BASE_SECONDS = 60
+BACKOFF_MAX_SECONDS = 86400
+
+# Marks a failed embedding attempt: FAILED plus exponential backoff (1 min, 2, 4 ... up to 1 day).
+# Conditional on the row still being stale for this model, so a late failure cannot overwrite a row
+# that another path (memory job / sweep) has meanwhile indexed.
+MARK_FAILED_SQL = f"""
+    UPDATE memory m SET index_status = 'FAILED', index_attempts = m.index_attempts + 1,
+        index_retry_at = now() + make_interval(secs => LEAST({BACKOFF_MAX_SECONDS},
+            {BACKOFF_BASE_SECONDS} * power(2, LEAST(m.index_attempts, 20))))
+    WHERE m.id = ANY(:ids) AND {STALE}
+"""
 OUTAGE_AFTER = 3  # consecutive single-row failures that mean "provider down"
 SWEEP_LOCK_KEY = 0x6169_7265_696E  # "aireindex"; pg advisory lock shared by worker sweeps and the CLI
 _ACTIVE_GENERATION = (
@@ -100,8 +116,8 @@ async def reindex_batch(db: Database, provider: ProviderAdapter, model: str, bat
             SELECT m.id, m.tenant_id, m.owner_id, m.conversation_id, {EMBED_TEXT} AS body
             FROM memory m JOIN ai_conversation c ON c.tenant_id = m.tenant_id
                  AND c.conversation_id = m.conversation_id AND c.epoch = m.epoch AND c.status = 'ACTIVE'
-            WHERE m.valid_to IS NULL AND {STALE}
-            ORDER BY (m.index_status = 'FAILED'), m.created_at
+            WHERE m.valid_to IS NULL AND {STALE} AND {DUE}
+            ORDER BY {DUE_ORDER}
             LIMIT :n
             """
         ), {"ev": model, "n": batch})).mappings().all()
@@ -112,7 +128,7 @@ async def reindex_batch(db: Database, provider: ProviderAdapter, model: str, bat
     except ProviderError as exc:
         log.warning("embedding re-index batch failed (%s); retrying rows one by one", type(exc).__name__)
         if len(rows) == 1:
-            await _mark_failed(db, rows)
+            await _mark_failed(db, rows, model)
             return ReindexResult(failed=1)
         total = ReindexResult()
         for r in rows:
@@ -129,15 +145,14 @@ async def _embed_rows(db: Database, provider: ProviderAdapter, model: str, rows:
     try:
         vectors, usage = await provider.embed([r["body"] for r in rows], model)
     except ProviderError:
-        await _mark_failed(db, rows)
+        await _mark_failed(db, rows, model)
         return ReindexResult(failed=len(rows))
     return await _write(db, model, rows, vectors, usage)
 
 
-async def _mark_failed(db: Database, rows: list[Any]) -> None:
+async def _mark_failed(db: Database, rows: list[Any], model: str) -> None:
     async with db.tx() as s:
-        await s.execute(text("UPDATE memory SET index_status = 'FAILED' WHERE id = ANY(:ids)"),
-                        {"ids": [r["id"] for r in rows]})
+        await s.execute(text(MARK_FAILED_SQL), {"ids": [r["id"] for r in rows], "ev": model})
 
 
 async def _write(db: Database, model: str, rows: list[Any], vectors: list[list[float]], usage: Any) -> ReindexResult:
@@ -146,7 +161,8 @@ async def _write(db: Database, model: str, rows: list[Any], vectors: list[list[f
         for r, vec in zip(rows, vectors, strict=True):
             res = await s.execute(text(
                 f"""
-                UPDATE memory m SET embedding = CAST(:v AS vector), embedding_version = :ev, index_status = 'INDEXED'
+                UPDATE memory m SET embedding = CAST(:v AS vector), embedding_version = :ev, index_status = 'INDEXED',
+                    index_attempts = 0, index_retry_at = NULL
                 WHERE m.id = :id AND m.valid_to IS NULL AND {STALE}
                   AND EXISTS (SELECT 1 FROM ai_conversation c WHERE c.tenant_id = m.tenant_id
                               AND c.conversation_id = m.conversation_id AND c.epoch = m.epoch AND c.status = 'ACTIVE')
