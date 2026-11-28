@@ -47,6 +47,24 @@
       ],
       "default": null,
       "title": "Appliedat"
+    },
+    "attempts": {
+      "default": 0,
+      "title": "Attempts",
+      "type": "integer"
+    },
+    "nextRetryAt": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Nextretryat"
     }
   },
   "required": [

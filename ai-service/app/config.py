@@ -94,6 +94,17 @@ class Settings(BaseSettings):
     # unchecked character facts stay hidden.
     revision_retry_after_seconds: float = 300.0
 
+    # Retention (plan §11, 24h): expired context snapshots are deleted, and finished generations older than
+    # this lose their SSE bodies and request copy (the final result stays queryable). 0 disables the sweep.
+    retention_hours: float = 24.0
+    retention_sweep_batch: int = 500
+
+    # Lifecycle events whose apply raised are retried with exponential backoff (base * 2^n, capped);
+    # after max attempts they wait for BE to re-send the same eventId.
+    lifecycle_retry_base_seconds: float = 5.0
+    lifecycle_retry_max_seconds: float = 600.0
+    lifecycle_max_attempts: int = 10
+
     # Data-decided tuning values with defaults (app/tuning.py, docs/tuning.md)
     tuning_file: str | None = None
     tuning: Tuning = Field(default_factory=Tuning)

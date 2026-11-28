@@ -12,7 +12,7 @@ import os
 import socket
 
 from app.dialogue.manager import DialogueManager
-from app.lifecycle.handler import process_pending
+from app.lifecycle.handler import RetryPolicy, process_pending
 from app.memory.pipeline import MemoryPipeline
 from app.memory.reindex import reindex_all, stale_counts
 from app.persistence import jobs
@@ -28,6 +28,8 @@ class WorkerRunner:
         self.dialogue = DialogueManager(services)
         self.memory = MemoryPipeline(services)
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        self.retry = RetryPolicy(self.cfg.lifecycle_retry_base_seconds, self.cfg.lifecycle_retry_max_seconds,
+                                 self.cfg.lifecycle_max_attempts)
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -42,7 +44,7 @@ class WorkerRunner:
     async def lifecycle_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                n = await process_pending(self.sv.db, self.cfg.lifecycle_batch, self.cfg.tuning)
+                n = await process_pending(self.sv.db, self.cfg.lifecycle_batch, self.cfg.tuning, self.retry)
             except Exception:
                 log.exception("lifecycle loop error")
                 n = 0
@@ -50,9 +52,18 @@ class WorkerRunner:
                 await self._sleep()
 
     async def maintenance_loop(self) -> None:
-        """Background upkeep: re-queue failed revision checks, re-embed stale memories."""
+        """Background upkeep: re-queue failed revision checks, re-embed stale memories, 24h retention."""
         interval = self.cfg.reindex_interval_seconds or 60.0
         while not self._stop.is_set():
+            if self.cfg.retention_hours > 0:
+                try:
+                    purged = await jobs.purge_expired(self.sv.db, self.cfg.retention_hours * 3600,
+                                                      self.cfg.retention_sweep_batch)
+                    if purged.snapshots or purged.jobs:
+                        log.info("retention: %d snapshots, %d generations (%d stream events) purged",
+                                 purged.snapshots, purged.jobs, purged.stream_events)
+                except Exception:
+                    log.exception("retention sweep error")
             try:
                 requeued = await jobs.requeue_failed_revisions(self.sv.db, self.cfg.revision_retry_after_seconds)
                 if requeued:

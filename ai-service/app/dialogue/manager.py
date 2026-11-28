@@ -39,6 +39,22 @@ WEEKDAYS = "월화수목금토일"
 MAX_PROVIDER_TRIES = 2
 
 
+@dataclass
+class _Progress:
+    """How far an attempt got, so a deadline hit reports where it stopped."""
+
+    stage: str = "context"  # context | model | streaming | saving
+
+    def deadline_error(self) -> tuple[ErrorCode, str]:
+        if self.stage == "context":
+            return ErrorCode.CONTEXT_NOT_READY, "deadline passed while preparing context"
+        return ErrorCode.PROVIDER_TIMEOUT, {
+            "model": "deadline passed before first token",
+            "streaming": "deadline passed during streaming",
+            "saving": "deadline passed before the answer was saved",
+        }[self.stage]
+
+
 class AttemptFailed(Exception):
     def __init__(self, code: ErrorCode, message: str) -> None:
         super().__init__(message)
@@ -85,16 +101,25 @@ class DialogueManager:
     # ------------------------------------------------------------ entry
     async def run_attempt(self, job: ClaimedJob) -> None:
         fenced = FencedJob(self.sv.db, job, self.cfg.lease_seconds)
+        progress = _Progress()
         try:
             req = GenerationRequest.model_validate(job.payload)
             if job.previous_status == JobStatus.STREAMING:
                 # A previous worker died mid-stream. Partial output cannot be resumed (plan §09).
                 raise AttemptFailed(ErrorCode.PROVIDER_ERROR, "worker lost during streaming")
-            if req.deadline_at <= utcnow():
+            remaining = (req.deadline_at - utcnow()).total_seconds()
+            if remaining <= 0:
                 raise AttemptFailed(ErrorCode.CONTEXT_NOT_READY, "deadline passed before start")
-            conv = await self.wait_context(fenced, req)
-            snapshot = await self.snapshot_for(fenced, req, conv)
-            await self.compose(fenced, req, snapshot)
+            # ONE deadline from here to the final save: context wait, model-slot wait (Ollama runs one call at a
+            # time), embedding, first token, streaming and the completed write. When it passes, the model call
+            # is cancelled (its slot and HTTP stream are released for the next user) and the attempt fails once.
+            try:
+                async with asyncio.timeout(remaining):
+                    conv = await self.wait_context(fenced, req)
+                    snapshot = await self.snapshot_for(fenced, req, conv)
+                    await self.compose(fenced, req, snapshot, progress)
+            except TimeoutError as exc:
+                raise AttemptFailed(*progress.deadline_error()) from exc
         except LeaseLost:
             log.info("lease lost or job revoked", extra={"job": job.id})
         except AttemptFailed as exc:
@@ -258,14 +283,18 @@ class DialogueManager:
                 )
             ).scalar()
 
-            user_text = normalize(req.user_message.text)
-            query = derive_query_hint(user_text, [t.user_text for t in recent if t.user_text])
-            query_vec: list[float] | None = None
-            try:
-                vecs, _ = await self.sv.provider.embed([query], self.cfg.embedding_model)
-                query_vec = vecs[0]
-            except ProviderError:
-                degraded.append("QUERY_EMBEDDING_FAILED")
+        # The DB connection goes back to the pool while we wait for the embedding model: a slow (or busy,
+        # single-slot) Ollama must not also hold a pool connection that other requests and jobs need.
+        user_text = normalize(req.user_message.text)
+        query = derive_query_hint(user_text, [t.user_text for t in recent if t.user_text])
+        query_vec: list[float] | None = None
+        try:
+            vecs, _ = await self.sv.provider.embed([query], self.cfg.embedding_model)
+            query_vec = vecs[0]
+        except ProviderError:
+            degraded.append("QUERY_EMBEDDING_FAILED")
+
+        async with self.sv.db.session() as s:
             retrieved = await retrieve(
                 s, scope, query, query_vec, self.cfg.embedding_model, now, tz,
                 character_revision=req.character_revision, top_k=self.cfg.retrieval_top_k, gate=self.cfg.retrieval_gate,
@@ -356,7 +385,11 @@ class DialogueManager:
         return Snapshot(snapshot_id, built.messages, character, degraded)
 
     # ------------------------------------------------------------ compose
-    async def compose(self, fenced: FencedJob, req: GenerationRequest, snap: Snapshot) -> None:
+    async def compose(
+        self, fenced: FencedJob, req: GenerationRequest, snap: Snapshot, progress: _Progress | None = None
+    ) -> None:
+        progress = progress or _Progress()
+        progress.stage = "model"
         ctx = self.cfg.tuning.context
         bump = self.cfg.regenerate_temperature_bump if req.mode == GenerationMode.REGENERATE else 0
         params = ChatParams(model=self.cfg.chat_model, temperature=ctx.chat_temperature + bump,
@@ -369,6 +402,7 @@ class DialogueManager:
                 if not started:
                     await fenced.guard(s, status=JobStatus.STREAMING.value)
                     started = True
+                    progress.stage = "streaming"
                 await fenced.append_event(s, "delta", {"text": chunk})
 
         last_error: Exception | None = None
@@ -393,7 +427,10 @@ class DialogueManager:
 
         usage = result.usage.as_dict()
         degraded = snap.degraded + sorted(result.flags)
+        progress.stage = "saving"
         async with self.sv.db.tx() as s:
+            if utcnow() >= req.deadline_at:  # BE has stopped waiting: do not record a late completion
+                raise AttemptFailed(*progress.deadline_error())
             await fenced.append_event(
                 s, "completed",
                 {"responseId": req.response_id, "text": result.text, "usage": usage, "contextSnapshotId": snap.id},

@@ -165,7 +165,7 @@ sequenceDiagram
 
 - 입력 합계 상한은 **7,260 토큰**(출력 600은 별도)입니다. 넘으면 **관련도 낮은 기억 → 요약 앞부분 → 최근 창(최소 3턴)** 순서로 줄입니다. 그래도 넘는 아주 긴 메시지는 실패시키지 않고 최근 창을 1턴까지 줄이며 `RECENT_BELOW_MINIMUM`을 기록합니다. 그래도 안 되면 `BUDGET_EXCEEDED`.
 - 프롬프트는 **변하지 않는 계층(1~3)을 첫 system 메시지**, 변하는 계층(4~7)을 두 번째 system 메시지로 둡니다. 공급자의 프롬프트 캐싱으로 입력 비용과 첫 토큰 지연을 줄이기 위해서입니다.
-- 조립한 Context는 **`context_snapshot`에 불변으로 저장**하고 hash를 남깁니다(24시간 보존). Regenerate는 이 스냅샷을 그대로 재사용합니다.
+- 조립한 Context는 **`context_snapshot`에 불변으로 저장**하고 hash를 남깁니다(24시간 보존). Regenerate는 이 스냅샷을 그대로 재사용합니다. 워커의 보존 스윕이 만료 스냅샷을 지우고, 끝난 지 24시간이 지난 생성의 SSE 본문과 요청 사본(사용자 메시지)도 지웁니다. 최종 결과(`GET /generations/{id}`)는 남고, SSE 재연결은 최종 결과 1건으로 대체됩니다(`AI_RETENTION_HOURS`, 0이면 끔).
 - 토큰 수는 채팅 모델의 토크나이저 파일(`AI_TOKENIZER_FILE`)이나 tiktoken이 있으면 정확히 세고, 없으면 공급자가 보고한 실제 입력 토큰 수로 보정한 비율을 씁니다(보정 전과 mock은 `글자 수 / 1.5`). 사용량 기록(`usage_ledger`)은 공급자가 보고한 값을 우선합니다. 자세한 내용은 [실행 문서](ai-service/README.md#토큰-수-계산).
 - 예산 값은 기본값이며 `AI_TUNING__CONTEXT__BUDGETS__RECENT=3200`처럼 바꿀 수 있습니다([튜닝 값](ai-service/docs/tuning.md)).
 
@@ -262,6 +262,7 @@ flowchart LR
 | 대화 초기화 | 차단표식 → 진행 중 Job을 `REVOKED` + fencing token 증가(SSE에 `failed: REVOKED`) → 사본·기억·관계·요약·스냅샷 삭제 → 같은 설정·첫 장면으로 새 epoch 시작 |
 | 캐릭터 삭제 | 캐릭터·대화 단위 차단표식을 남기고 전 세대 삭제. 늦게 온 이벤트나 재전달된 `ConversationOpened`로 되살아나지 않음 |
 | 모델 장애 | 스트림 시작 전이면 deadline 안에서 1회 더 시도. 시작 후면 다른 모델로 이어 붙이지 않고 실패 → 사용자가 Retry |
+| `deadlineAt` 초과 | 문맥 대기, 모델 슬롯 대기(Ollama 동시 1개), 임베딩, 첫 토큰, 스트리밍, 완료 저장까지 마감 하나로 묶습니다. 지나면 모델 호출을 끊어 슬롯을 다음 요청에 넘기고, `failed`를 한 번만 기록합니다(첫 토큰 전·스트리밍 중 모두 `PROVIDER_TIMEOUT`). 마감 후에는 `completed`를 저장하지 않습니다 |
 | Worker 사망 | lease가 끝나면 다른 Worker가 다시 claim. 출력 전이면 다시 실행, 스트리밍 중이었으면 실패 처리. 죽은 Worker의 늦은 쓰기는 fencing token으로 거부 |
 
 **생성 Job 상태**
@@ -275,7 +276,8 @@ stateDiagram-v2
     RUNNING --> STREAMING: 첫 청크
     STREAMING --> COMPLETED: 결과 저장
     WAITING_CONTEXT --> FAILED: deadline 초과
-    RUNNING --> FAILED: 실행 오류
+    RUNNING --> FAILED: 실행 오류·deadline 초과
+    STREAMING --> FAILED: deadline 초과
     STREAMING --> FAILED: 부분 출력 후 복구 불가
     ACCEPTED --> REVOKED: 초기화·삭제
     RUNNING --> REVOKED: 초기화·삭제
@@ -291,11 +293,11 @@ stateDiagram-v2
 
 | 엔드포인트 | 결과 | 의미 |
 |---|---|---|
-| `POST /internal/ai/v1/generations` | `202 {aiJobId, status}` | 저장 후 응답. `mode=NEW`에 `contextSnapshotId`를 넣으면 `422`. 같은 `attemptId`+같은 본문 → 같은 Job, 본문이 다르면 `409 IDEMPOTENCY_CONFLICT`. 미등록 대화는 `404`, 차단된 epoch는 `409 EPOCH_REVOKED` |
+| `POST /internal/ai/v1/generations` | `202 {aiJobId, status}` | 저장 후 응답. `mode=NEW`에 `contextSnapshotId`를 넣으면 `422`. 없는 `timezone`, UTC 오프셋 없는 `deadlineAt`·`sentAt`도 `422`. 확인과 저장은 대화 단위 잠금 아래 한 트랜잭션이라, 초기화·삭제와 순서가 보장됩니다(삭제 뒤에 옛 대화 메시지가 저장되지 않음). 같은 `attemptId`+같은 본문 → 같은 Job, 본문이 다르면 `409 IDEMPOTENCY_CONFLICT`. 미등록 대화는 `404`, 차단된 epoch는 `409 EPOCH_REVOKED` |
 | `GET /generations/{aiJobId}` | 상태, text, usage, error, snapshotId, degraded | 저장된 결과만 반환 |
 | `GET /generations/{aiJobId}/events` | SSE `accepted · delta · completed · failed` | `eventSeq` 단조 증가, `Last-Event-ID`(또는 `?after=`) 이후 재전송 |
 | `POST /lifecycle-events` | `202 {receiptId}` | Inbox 저장만 의미 (202 ≠ 반영 완료) |
-| `GET /lifecycle-events/{receiptId}` | `RECEIVED · APPLIED · FAILED` | BE가 반영·삭제 완료를 추적. 반영된 이벤트는 영수증·순번만 남기고 본문을 지웁니다. FAILED 본문은 원인 확인·재처리를 위해 남기며, 초기화·삭제 때 함께 지웁니다 |
+| `GET /lifecycle-events/{receiptId}` | `RECEIVED · APPLIED · FAILED` | BE가 반영·삭제 완료를 추적. 반영된 이벤트는 영수증·순번만 남기고 본문을 지웁니다. FAILED는 5초부터 두 배씩(최대 10분) 최대 10번 자동 재시도하며 `attempts`·`nextRetryAt`으로 보입니다. 같은 `eventId`를 다시 보내면 즉시 재시도하고(소진된 경우도), 이미 APPLIED면 아무 일도 하지 않습니다. 재시도 동안 같은 대화의 다음 이벤트는 순서대로 기다립니다. FAILED 본문은 초기화·삭제 때 함께 지웁니다 |
 | `GET /conversations/{id}/state?tenantId=&epoch=` | watermark들 | 진단용. 기억 본문은 노출하지 않음 |
 
 Lifecycle 이벤트: `ConversationOpened`, `AnswerCommitted`, `CharacterRevisionChanged`, `ConversationReset`, `CharacterDeleted`.

@@ -10,8 +10,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 SCHEMA_VERSION = "1.0"
@@ -52,7 +53,7 @@ class OpeningScene(ContractModel):
 class ChatMessage(ContractModel):
     id: str
     text: str = Field(max_length=4000)
-    sent_at: datetime
+    sent_at: AwareDatetime  # must carry a UTC offset; a naive time is ambiguous
 
 
 class AssistantMessage(ContractModel):
@@ -126,8 +127,18 @@ class GenerationRequest(ContractModel):
     context_snapshot_id: str | None = None
     timezone: str = "Asia/Seoul"
     generation_policy_version: str = "chat-v1"
-    deadline_at: datetime
+    deadline_at: AwareDatetime  # must carry a UTC offset (e.g. ...Z or +09:00)
     trace_id: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def check_timezone(cls, v: str) -> str:
+        # Reject at the door (422) instead of failing later in the worker with ZoneInfoNotFoundError.
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+            raise ValueError(f"unknown IANA timezone: {v!r}") from exc
+        return v
 
     @model_validator(mode="after")
     def check_new_context(self):
@@ -181,7 +192,7 @@ class _EventBase(ContractModel):
     aggregate_type: AggregateType
     aggregate_id: str
     aggregate_seq: int = Field(ge=1)
-    occurred_at: datetime
+    occurred_at: AwareDatetime
 
 
 class ConversationOpenedPayload(ContractModel):
@@ -271,6 +282,10 @@ class LifecycleReceipt(ContractModel):
     status: LifecycleReceiptStatus
     error: str | None = None
     applied_at: datetime | None = None
+    # FAILED events are retried with backoff. ``nextRetryAt`` null on a FAILED receipt = retries exhausted;
+    # re-sending the same eventId retries it at once (an APPLIED event is never applied twice).
+    attempts: int = 0
+    next_retry_at: datetime | None = None
 
 
 class ConversationState(ContractModel):
