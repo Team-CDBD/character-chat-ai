@@ -14,6 +14,7 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.13",
     "pgvector>=0.3",
+    "tzdata>=2024.1",  # IANA zones even where the OS image has none (timezone validation)
 ]
 
 [project.optional-dependencies]

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     ConversationState,
@@ -31,7 +32,7 @@ from app.api.schemas import (
     LifecycleReceipt,
     Usage,
 )
-from app.lifecycle.handler import receive_event
+from app.lifecycle.handler import is_revoked, lock_conversation_scope, receive_event
 from app.persistence.models import new_id
 from app.services import Services
 
@@ -76,66 +77,10 @@ def payload_hash(req: GenerationRequest) -> str:
 )
 async def accept_generation(req: GenerationRequest, sv: ServicesDep) -> GenerationAccepted:
     h = payload_hash(req)
-    async with sv.db.session() as s:
-        existing = (
-            await s.execute(
-                text("SELECT id, payload_hash, status FROM ai_job WHERE kind='GENERATION' AND attempt_id=:a"),
-                {"a": req.attempt_id},
-            )
-        ).first()
-        if existing:
-            if existing[1] != h:
-                raise api_error(409, "IDEMPOTENCY_CONFLICT", "same attemptId with a different payload")
-            return GenerationAccepted(ai_job_id=existing[0], status=JobStatus(existing[2]))
-
-        conv = (
-            await s.execute(
-                text("SELECT status FROM ai_conversation WHERE tenant_id=:t AND owner_id=:o AND conversation_id=:c AND epoch=:e"),
-                {"t": req.tenant_id, "o": req.owner_id, "c": req.conversation_id, "e": req.epoch},
-            )
-        ).scalar()
-        if conv == "REVOKED":
-            raise api_error(409, "EPOCH_REVOKED", "conversation epoch was reset or deleted")
-        if conv is None:
-            pending = (
-                await s.execute(
-                    text(
-                        "SELECT 1 FROM event_inbox WHERE tenant_id=:t AND aggregate_type='CONVERSATION' "
-                        "AND aggregate_id=:c AND status='RECEIVED' LIMIT 1"
-                    ),
-                    {"t": req.tenant_id, "c": req.conversation_id},
-                )
-            ).first()
-            if pending is None:
-                raise api_error(404, "CONVERSATION_NOT_REGISTERED", "ConversationOpened not received for this epoch")
-
-    job_id = new_id()
     try:
-        async with sv.db.tx() as s:
-            await s.execute(
-                text(
-                    """
-                    INSERT INTO ai_job (id, kind, tenant_id, owner_id, conversation_id, epoch, turn_seq, attempt_id,
-                        response_id, payload_hash, payload, mode, status, fencing_token, run_count, deadline_at,
-                        next_event_seq, degraded, created_at, updated_at)
-                    VALUES (:id, 'GENERATION', :t, :o, :c, :e, :ts, :a, :r, :h, CAST(:p AS jsonb), :m, 'ACCEPTED', 0, 0,
-                        :d, 2, '[]'::jsonb, now(), now())
-                    """
-                ),
-                {"id": job_id, "t": req.tenant_id, "o": req.owner_id, "c": req.conversation_id, "e": req.epoch,
-                 "ts": req.turn_seq, "a": req.attempt_id, "r": req.response_id, "h": h,
-                 "p": req.model_dump_json(by_alias=True), "m": req.mode.value, "d": req.deadline_at},
-            )
-            await s.execute(
-                text(
-                    "INSERT INTO stream_event (job_id, event_seq, event, data, created_at) "
-                    "VALUES (:id, 1, 'accepted', CAST(:d AS jsonb), now())"
-                ),
-                {"id": job_id, "d": json.dumps({"aiJobId": job_id, "attemptId": req.attempt_id})},
-            )
+        return await _accept(sv, req, h)
     except IntegrityError as exc:
-        msg = str(exc.orig)
-        if "uq_active_generation" in msg:
+        if "uq_active_generation" in str(exc.orig):
             raise api_error(409, "ACTIVE_GENERATION_EXISTS", "a generation is already running for this conversation") from exc
         # Lost a race with an identical request: re-read and answer idempotently.
         async with sv.db.session() as s:
@@ -148,7 +93,80 @@ async def accept_generation(req: GenerationRequest, sv: ServicesDep) -> Generati
         if row is None or row[1] != h:
             raise api_error(409, "IDEMPOTENCY_CONFLICT", "same attemptId with a different payload") from exc
         return GenerationAccepted(ai_job_id=row[0], status=JobStatus(row[2]))
+
+
+async def _accept(sv: Services, req: GenerationRequest, h: str) -> GenerationAccepted:
+    """Check the conversation and store the job in ONE transaction under the conversation lock.
+
+    Reset / delete take the same lock before revoking (lifecycle/handler.py ``_revoke_epoch``), so the two
+    are strictly ordered per conversation: either this job exists first and is revoked + scrubbed by the
+    cleanup, or the cleanup committed first and this request is refused. The user's message is never stored
+    for a conversation whose data was already deleted.
+    """
+    async with sv.db.tx() as s:
+        existing = (
+            await s.execute(
+                text("SELECT id, payload_hash, status FROM ai_job WHERE kind='GENERATION' AND attempt_id=:a"),
+                {"a": req.attempt_id},
+            )
+        ).first()
+        if existing:
+            if existing[1] != h:
+                raise api_error(409, "IDEMPOTENCY_CONFLICT", "same attemptId with a different payload")
+            return GenerationAccepted(ai_job_id=existing[0], status=JobStatus(existing[2]))
+
+        await lock_conversation_scope(s, req.tenant_id, req.conversation_id)
+        conv = (
+            await s.execute(
+                text("SELECT status, character_id FROM ai_conversation WHERE tenant_id=:t AND owner_id=:o "
+                     "AND conversation_id=:c AND epoch=:e"),
+                {"t": req.tenant_id, "o": req.owner_id, "c": req.conversation_id, "e": req.epoch},
+            )
+        ).first()
+        if (conv is not None and conv[0] == "REVOKED") or await is_revoked(
+            s, req.tenant_id, req.conversation_id, req.epoch, conv[1] if conv else None
+        ):
+            raise api_error(409, "EPOCH_REVOKED", "conversation epoch was reset or deleted")
+        if conv is None:
+            pending = (
+                await s.execute(
+                    text(
+                        "SELECT 1 FROM event_inbox WHERE tenant_id=:t AND aggregate_type='CONVERSATION' "
+                        "AND aggregate_id=:c AND status IN ('RECEIVED', 'FAILED') LIMIT 1"
+                    ),
+                    {"t": req.tenant_id, "c": req.conversation_id},
+                )
+            ).first()
+            if pending is None:
+                raise api_error(404, "CONVERSATION_NOT_REGISTERED", "ConversationOpened not received for this epoch")
+
+        job_id = new_id()
+        await _insert_generation(s, job_id, req, h)
     return GenerationAccepted(ai_job_id=job_id, status=JobStatus.ACCEPTED)
+
+
+async def _insert_generation(s: AsyncSession, job_id: str, req: GenerationRequest, h: str) -> None:
+    await s.execute(
+        text(
+            """
+            INSERT INTO ai_job (id, kind, tenant_id, owner_id, conversation_id, epoch, turn_seq, attempt_id,
+                response_id, payload_hash, payload, mode, status, fencing_token, run_count, deadline_at,
+                next_event_seq, degraded, created_at, updated_at)
+            VALUES (:id, 'GENERATION', :t, :o, :c, :e, :ts, :a, :r, :h, CAST(:p AS jsonb), :m, 'ACCEPTED', 0, 0,
+                :d, 2, '[]'::jsonb, now(), now())
+            """
+        ),
+        {"id": job_id, "t": req.tenant_id, "o": req.owner_id, "c": req.conversation_id, "e": req.epoch,
+         "ts": req.turn_seq, "a": req.attempt_id, "r": req.response_id, "h": h,
+         "p": req.model_dump_json(by_alias=True), "m": req.mode.value, "d": req.deadline_at},
+    )
+    await s.execute(
+        text(
+            "INSERT INTO stream_event (job_id, event_seq, event, data, created_at) "
+            "VALUES (:id, 1, 'accepted', CAST(:d AS jsonb), now())"
+        ),
+        {"id": job_id, "d": json.dumps({"aiJobId": job_id, "attemptId": req.attempt_id})},
+    )
 
 
 def _result(row: Any) -> GenerationResult:
@@ -269,12 +287,13 @@ async def post_lifecycle_event(event: LifecycleEvent, sv: ServicesDep) -> Lifecy
 async def get_lifecycle_receipt(receipt_id: str, sv: ServicesDep) -> LifecycleReceipt:
     async with sv.db.session() as s:
         row = (
-            await s.execute(text("SELECT id, event_id, status, error, applied_at FROM event_inbox WHERE id=:id"),
-                            {"id": receipt_id})
+            await s.execute(text("SELECT id, event_id, status, error, applied_at, attempts, next_attempt_at "
+                                 "FROM event_inbox WHERE id=:id"), {"id": receipt_id})
         ).first()
     if row is None:
         raise api_error(404, "NOT_FOUND", "receipt not found")
-    return LifecycleReceipt(receipt_id=row[0], event_id=row[1], status=row[2], error=row[3], applied_at=row[4])
+    return LifecycleReceipt(receipt_id=row[0], event_id=row[1], status=row[2], error=row[3], applied_at=row[4],
+                            attempts=row[5], next_retry_at=row[6] if row[2] == "FAILED" else None)
 
 
 @router.get(

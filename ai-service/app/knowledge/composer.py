@@ -7,6 +7,7 @@ model's answer onto a partial one (plan §09).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 from dataclasses import dataclass, field
 
 from app.knowledge.output_policy import ChunkPolicy, PolicyBlocked
@@ -39,13 +40,16 @@ async def generate(
     emitted_any = False
     outcome: StreamOutcome | None = None
     try:
-        async for item in provider.stream_chat(messages, params):
-            if isinstance(item, StreamOutcome):
-                outcome = item
-                break
-            for chunk in policy.feed(item):
-                await emit(chunk)
-                emitted_any = True
+        # aclosing: if emit() fails (lease lost, policy block) the provider stream is closed right away,
+        # which releases the model slot instead of leaving it to garbage collection.
+        async with aclosing(provider.stream_chat(messages, params)) as stream:
+            async for item in stream:
+                if isinstance(item, StreamOutcome):
+                    outcome = item
+                    break
+                for chunk in policy.feed(item):
+                    await emit(chunk)
+                    emitted_any = True
         for chunk in policy.flush():
             await emit(chunk)
             emitted_any = True

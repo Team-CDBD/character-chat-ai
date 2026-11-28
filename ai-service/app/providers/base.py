@@ -111,22 +111,30 @@ class ProviderAdapter:
             parts: list[str] = []
             reported_usage = None
             iterator = self.provider.stream_chat(messages, params).__aiter__()
-            while True:
-                try:
-                    delta = await asyncio.wait_for(iterator.__anext__(), timeout=self.timeout)
-                except StopAsyncIteration:
-                    break
-                except TimeoutError as exc:
-                    raise ProviderTimeout("provider stream timed out") from exc
-                except ProviderError:
-                    raise
-                except Exception as exc:  # normalize unknown SDK errors
-                    raise ProviderError(str(exc)) from exc
-                if isinstance(delta, Usage):
-                    reported_usage = delta
-                    continue
-                parts.append(delta)
-                yield delta
+            try:
+                while True:
+                    try:
+                        delta = await asyncio.wait_for(iterator.__anext__(), timeout=self.timeout)
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError as exc:
+                        raise ProviderTimeout("provider stream timed out") from exc
+                    except ProviderError:
+                        raise
+                    except Exception as exc:  # normalize unknown SDK errors
+                        raise ProviderError(str(exc)) from exc
+                    if isinstance(delta, Usage):
+                        reported_usage = delta
+                        continue
+                    parts.append(delta)
+                    yield delta
+            finally:
+                # Close the provider stream (its HTTP connection) on every exit: completion, error, the attempt
+                # deadline cancelling us, or the caller abandoning the stream. Ollama stops generating when the
+                # client goes away, so the slot and the model are free for the next request.
+                aclose = getattr(iterator, "aclose", None)
+                if aclose is not None:
+                    await aclose()
             text = "".join(parts)
             self._observe(messages, params, reported_usage)
             usage = reported_usage or Usage(

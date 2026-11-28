@@ -248,3 +248,61 @@ async def requeue_failed_revisions(db: Database, after_seconds: float) -> int:
             {"after": after_seconds},
         )
         return res.rowcount  # type: ignore[attr-defined]
+
+
+@dataclass
+class PurgeResult:
+    snapshots: int = 0
+    jobs: int = 0
+    stream_events: int = 0
+
+
+async def purge_expired(db: Database, retention_seconds: float, batch: int, max_batches: int = 10) -> PurgeResult:
+    """24h retention (plan §11): delete expired context snapshots, and for generations finished longer ago
+    than ``retention_seconds`` drop the SSE bodies and the request copy (it holds the user's message).
+
+    The job row keeps status, ``result_text``, usage and error, so ``GET /generations/{id}`` still answers
+    and SSE recovery replays the final result as one ``completed`` / ``failed`` event (routes.stream_events).
+    Small batches with SKIP LOCKED: the sweep never blocks request traffic for long.
+    """
+    out = PurgeResult()
+    terminal = ["COMPLETED", "FAILED", "REVOKED"]
+    for _ in range(max_batches):
+        async with db.tx() as s:
+            res = await s.execute(
+                text(
+                    """
+                    DELETE FROM context_snapshot WHERE id IN (
+                        SELECT id FROM context_snapshot WHERE expires_at < now()
+                        ORDER BY expires_at LIMIT :n FOR UPDATE SKIP LOCKED)
+                    """
+                ),
+                {"n": batch},
+            )
+            snaps = res.rowcount  # type: ignore[attr-defined]
+            ids = (
+                await s.execute(
+                    text(
+                        """
+                        SELECT id FROM ai_job
+                        WHERE kind = 'GENERATION' AND completed_at IS NOT NULL AND payload <> '{}'::jsonb
+                          AND completed_at < now() - make_interval(secs => :ret) AND status = ANY(:terminal)
+                        ORDER BY completed_at LIMIT :n FOR UPDATE SKIP LOCKED
+                        """
+                    ),
+                    {"ret": retention_seconds, "terminal": terminal, "n": batch},
+                )
+            ).scalars().all()
+            events = 0
+            if ids:
+                events = (
+                    await s.execute(text("DELETE FROM stream_event WHERE job_id = ANY(:ids)"), {"ids": list(ids)})
+                ).rowcount  # type: ignore[attr-defined]
+                await s.execute(text("UPDATE ai_job SET payload = '{}'::jsonb WHERE id = ANY(:ids)"),
+                                {"ids": list(ids)})
+        out.snapshots += snaps
+        out.jobs += len(ids)
+        out.stream_events += events
+        if snaps < batch and len(ids) < batch:
+            break
+    return out

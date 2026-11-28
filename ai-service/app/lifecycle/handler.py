@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -56,7 +57,7 @@ async def receive_event(db: Database, event: Any) -> str:
     async with db.tx() as s:
         if "epoch" in payload:
             conversation = payload["conversationId"]
-            await _lock_inbox_scope(s, event.tenant_id, conversation)
+            await lock_conversation_scope(s, event.tenant_id, conversation)
             if await is_revoked(s, event.tenant_id, conversation, payload["epoch"], payload.get("characterId")):
                 payload = {}
         row = (
@@ -87,24 +88,58 @@ async def receive_event(db: Database, event: Any) -> str:
         ).first()
         if row:
             return row[0]
-        existing = (
-            await s.execute(text("SELECT id FROM event_inbox WHERE event_id = :e"), {"e": event.event_id})
+    # Same eventId again. APPLIED stays applied (the effect happens once); a FAILED event is re-armed so the
+    # next lifecycle pass retries it now instead of waiting for its backoff (or forever, once exhausted).
+    # Separate transaction: it must not wait on the inbox row while holding the conversation lock.
+    async with db.tx() as s:
+        return (
+            await s.execute(
+                text(
+                    """
+                    WITH rearm AS (
+                        UPDATE event_inbox SET next_attempt_at = now(),
+                               attempts = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE attempts END
+                        WHERE event_id = :e AND status = 'FAILED'
+                        RETURNING id
+                    )
+                    SELECT id FROM rearm UNION ALL SELECT id FROM event_inbox WHERE event_id = :e LIMIT 1
+                    """
+                ),
+                {"e": event.event_id},
+            )
         ).scalar_one()
-        return existing
 
 
-async def process_pending(db: Database, batch: int = 50, tuning: Tuning = DEFAULT_TUNING) -> int:
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Backoff for events whose apply raised (e.g. a DB hiccup). Same eventId re-sent = retry now."""
+
+    base_seconds: float = 5.0
+    max_seconds: float = 600.0
+    max_attempts: int = 10
+
+
+DEFAULT_RETRY = RetryPolicy()
+
+# RECEIVED, or FAILED whose backoff is over. An exhausted FAILED event (next_attempt_at NULL) waits for a
+# re-send of the same eventId (receive_event) or a fix under a new eventId with the same aggregateSeq.
+_READY = "(i.status = 'RECEIVED' OR (i.status = 'FAILED' AND i.next_attempt_at <= now()))"
+
+
+async def process_pending(
+    db: Database, batch: int = 50, tuning: Tuning = DEFAULT_TUNING, retry: RetryPolicy = DEFAULT_RETRY
+) -> int:
     """Apply ready events. Returns how many were applied (or failed)."""
     async with db.session() as s:
         rows = (
             await s.execute(
                 text(
-                    """
+                    f"""
                     SELECT i.id FROM event_inbox i
                     LEFT JOIN lifecycle_cursor c
                       ON c.tenant_id = i.tenant_id AND c.aggregate_type = i.aggregate_type
                      AND c.aggregate_id = i.aggregate_id
-                    WHERE i.status = 'RECEIVED' AND i.aggregate_seq <= COALESCE(c.applied_seq, 0) + 1
+                    WHERE {_READY} AND i.aggregate_seq <= COALESCE(c.applied_seq, 0) + 1
                     ORDER BY i.aggregate_seq, i.received_at
                     LIMIT :n
                     """
@@ -114,17 +149,17 @@ async def process_pending(db: Database, batch: int = 50, tuning: Tuning = DEFAUL
         ).all()
     done = 0
     for (inbox_id,) in rows:
-        if await _apply_one(db, inbox_id, tuning):
+        if await _apply_one(db, inbox_id, tuning, retry):
             done += 1
     return done
 
 
-async def _apply_one(db: Database, inbox_id: str, tuning: Tuning) -> bool:
+async def _apply_one(db: Database, inbox_id: str, tuning: Tuning, retry: RetryPolicy = DEFAULT_RETRY) -> bool:
     try:
         async with db.tx() as s:
             ev = (
                 await s.execute(
-                    text("SELECT * FROM event_inbox WHERE id = :id AND status = 'RECEIVED' FOR UPDATE SKIP LOCKED"),
+                    text(f"SELECT * FROM event_inbox i WHERE id = :id AND {_READY} FOR UPDATE SKIP LOCKED"),
                     {"id": inbox_id},
                 )
             ).mappings().first()
@@ -163,17 +198,28 @@ async def _apply_one(db: Database, inbox_id: str, tuning: Tuning) -> bool:
             )
             await _mark(s, inbox_id, "APPLIED", None)
         return True
-    except Exception as exc:  # the aggregate stays blocked until the event is fixed and re-sent
+    except Exception as exc:  # retried with backoff; later events of the aggregate wait (order is kept)
         log.exception("lifecycle event failed", extra={"inbox_id": inbox_id})
         async with db.tx() as s:
-            await _mark(s, inbox_id, "FAILED", type(exc).__name__)
+            await s.execute(
+                text(
+                    """
+                    UPDATE event_inbox SET status = 'FAILED', error = :err, attempts = attempts + 1,
+                           next_attempt_at = CASE WHEN attempts + 1 >= :max THEN NULL
+                               ELSE now() + make_interval(secs => LEAST(:cap, :base * power(2, attempts))) END
+                    WHERE id = :id AND status IN ('RECEIVED', 'FAILED')
+                    """
+                ),
+                {"err": type(exc).__name__, "max": retry.max_attempts, "cap": retry.max_seconds,
+                 "base": retry.base_seconds, "id": inbox_id},
+            )
         return True
 
 
 async def _mark(s: AsyncSession, inbox_id: str, status: str, error: str | None) -> None:
     # Applied bodies are no longer needed (receipt + seq stay for dedupe). A FAILED body is kept so the
     # event can be inspected and re-queued; reset/delete still scrubs it with the rest of the conversation.
-    scrub = ", payload = '{}'::jsonb" if status == "APPLIED" else ""
+    scrub = ", payload = '{}'::jsonb, next_attempt_at = NULL" if status == "APPLIED" else ""
     await s.execute(
         text(f"UPDATE event_inbox SET status = :st, error = :err, applied_at = now(){scrub} WHERE id = :id"),
         {"st": status, "err": error, "id": inbox_id},
@@ -202,7 +248,13 @@ async def is_revoked(s: AsyncSession, tenant: str, conversation_id: str, epoch: 
 
 
 async def _revoke_epoch(s: AsyncSession, tenant: str, conversation_id: str, epoch: int, reason: str) -> None:
-    """Block first, then clean. Running jobs lose their fencing token immediately."""
+    """Block first, then clean. Running jobs lose their fencing token immediately.
+
+    Holds the conversation lock from the first write: accept_generation takes the same lock around its
+    check-and-insert, so a generation is either accepted before this (and revoked + scrubbed here) or sees
+    the revocation and is refused. It can never store an old conversation's message after the cleanup.
+    """
+    await lock_conversation_scope(s, tenant, conversation_id)
     await s.execute(
         text(
             "INSERT INTO revocation (id, tenant_id, scope, target_id, epoch, reason, created_at) "
@@ -250,7 +302,8 @@ _DERIVED_TABLES = (
 )
 
 
-async def _lock_inbox_scope(s: AsyncSession, tenant: str, conversation_id: str) -> None:
+async def lock_conversation_scope(s: AsyncSession, tenant: str, conversation_id: str) -> None:
+    """Per-conversation transaction lock shared by inbox writes, revocation and generation accept."""
     await s.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
                     {"scope": _j([tenant, conversation_id])})
 
@@ -261,7 +314,7 @@ async def _purge_epoch(s: AsyncSession, tenant: str, conversation_id: str, epoch
     params: dict[str, Any] = {"t": tenant, "c": conversation_id}
     if epoch is not None:
         params["e"] = epoch
-    await _lock_inbox_scope(s, tenant, conversation_id)
+    await lock_conversation_scope(s, tenant, conversation_id)
     # Indexed by (tenant_id, conversation_id); bodies already scrubbed are skipped.
     inbox_epoch = "AND payload->>'epoch' = CAST(:e AS text)" if epoch is not None else ""
     await s.execute(text(
@@ -521,6 +574,16 @@ async def apply_character_deleted(
     s: AsyncSession, tenant: str, owner: str, raw: dict[str, Any], tuning: Tuning = DEFAULT_TUNING
 ) -> None:
     p = CharacterDeletedPayload.model_validate(raw)
+    # Lock every affected conversation before the first revocation write (sorted: no lock-order deadlocks).
+    targets = (
+        await s.execute(
+            text("SELECT DISTINCT conversation_id FROM ai_conversation WHERE tenant_id=:t AND owner_id=:o "
+                 "AND (character_id=:ch OR conversation_id = ANY(:ids))"),
+            {"t": tenant, "o": owner, "ch": p.character_id, "ids": p.conversation_ids},
+        )
+    ).scalars().all()
+    for conversation_id in sorted(set(targets) | set(p.conversation_ids)):
+        await lock_conversation_scope(s, tenant, conversation_id)
     await s.execute(
         text(
             "INSERT INTO revocation (id, tenant_id, scope, target_id, epoch, reason, created_at) "

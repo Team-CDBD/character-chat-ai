@@ -1421,6 +1421,23 @@
               }
             ],
             "title": "Appliedat"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts",
+            "default": 0
+          },
+          "nextRetryAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nextretryat"
           }
         },
         "additionalProperties": false,
